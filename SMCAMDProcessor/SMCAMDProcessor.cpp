@@ -71,7 +71,13 @@ bool SMCAMDProcessor::setupKeysVsmc(){
     } else {
         IOLog("SMCAMDProcessor::setupKeysVsmc: fProvider is null, skipping key registration\n");
     }
-    
+
+    // VirtualSMC looks plugin keys up with a binary search, so the key list must be
+    // sorted. Without this, keys registered out of order (TC0D/TC0P/PCPR/PSTR...)
+    // return "key not found" to AppleSMC clients (iStat, HWMonitor, fan tools).
+    qsort(const_cast<VirtualSMCKeyValue *>(vsmcPlugin.data.data()), vsmcPlugin.data.size(),
+          sizeof(VirtualSMCKeyValue), VirtualSMCKeyValue::compare);
+
     if(!suc){
         IOLog("SMCAMDProcessor::setupKeysVsmc: VirtualSMCAPI::addKey returned false (registered %zu/%zu keys). \n", keyCount, keyCount);
     } else {

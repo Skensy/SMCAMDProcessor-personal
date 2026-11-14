@@ -598,10 +598,32 @@ bool AMDRyzenCPUPowerManagement::start(IOService *provider){
     
     // Probe for available CCDs by reading CCD temperature registers.
     // A CCD is considered present if the valid bit (bit 11) is set.
+    // Monolithic APUs have no CCDs: the registers at the CCD offset hold unrelated
+    // data whose bit 11 is often set, which produced phantom CCDs (e.g. 14 on a
+    // Renoir 4600H with readings like -47 C). Linux k10temp never reads CCD
+    // temperatures on these models, so skip the probe entirely.
     ccdCount = 0;
-    for (uint8_t i = 0; i < kMAX_CCD_COUNT; i++) {
-        uint32_t regVal = readCCDRegisterRaw(i);
-        if (regVal & kZEN_CCD_TEMP_VALID_BIT) {
+    bool monolithicAPU =
+        (cpuFamily == 0x17 && ((cpuModel >= 0x10 && cpuModel <= 0x2F) ||   // Raven, Picasso, Dali, Pollock
+                               (cpuModel >= 0x60 && cpuModel <= 0x6F) ||   // Renoir, Lucienne
+                               (cpuModel >= 0x90 && cpuModel <= 0xAF))) || // Van Gogh, Mendocino
+        (cpuFamily == 0x19 && ((cpuModel >= 0x40 && cpuModel <= 0x5F) ||   // Rembrandt, Cezanne, Barcelo
+                               (cpuModel >= 0x70 && cpuModel <= 0x7F))) || // Phoenix, Hawk Point
+        (cpuFamily == 0x1A && ((cpuModel >= 0x20 && cpuModel <= 0x2F) ||   // Strix Point
+                               (cpuModel >= 0x60 && cpuModel <= 0x6F)));   // Krackan Point
+    if (monolithicAPU) {
+        IOLog("AMDRyzenCPUPowerManagement::start monolithic APU (Family %02Xh Model %02Xh), skipping CCD probe\n",
+              cpuFamily, cpuModel);
+    } else {
+        for (uint8_t i = 0; i < kMAX_CCD_COUNT; i++) {
+            uint32_t regVal = readCCDRegisterRaw(i);
+            if (!(regVal & kZEN_CCD_TEMP_VALID_BIT)) continue;
+            // Reject implausible readings (same formula as getCCDTemp, before tempOffset).
+            float t = (float)(regVal & kZEN_CCD_TEMP_MASK) * 0.125f - 49.0f;
+            if (t < 0.0f || t > 125.0f) {
+                IOLog("AMDRyzenCPUPowerManagement::start CCD%u ignored, implausible %d C raw=0x%X\n", i, (int)t, regVal);
+                continue;
+            }
             ccdCount = i + 1;
             IOLog("AMDRyzenCPUPowerManagement::start CCD%u detected, raw=0x%X\n", i, regVal);
         }
@@ -1141,7 +1163,8 @@ uint32_t AMDRyzenCPUPowerManagement::readCCDRegisterRaw(uint8_t ccd) {
 }
 
 float AMDRyzenCPUPowerManagement::getCCDTemp(uint8_t ccd) {
-    if (ccd >= kMAX_CCD_COUNT) return 0.0f;
+    // Only CCDs found by the start() probe are real; callers fall back to package temp.
+    if (ccd >= kMAX_CCD_COUNT || ccd >= ccdCount) return 0.0f;
     
     uint32_t regVal = readCCDRegisterRaw(ccd);
     
