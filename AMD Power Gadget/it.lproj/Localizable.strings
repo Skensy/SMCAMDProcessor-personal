@@ -631,3 +631,11 @@
 "AMDRyzenCPUPowerManagement kext not connected." = "Kext AMDRyzenCPUPowerManagement non connesso.";
 "If the switch snaps back to Off: enable writes with boot-arg -amdpnopchk (or run as root). With -amdcppcactive the kext enables Active Mode at boot after reboot." = "Se l’interruttore torna a Off: abilita le scritture con -amdpnopchk (o root). Con -amdcppcactive il kext attiva Active Mode all’avvio dopo il reboot.";
 "Checking for updates..." = "Checking for updates...";
+
+"Battery discharge" = "Scarica della batteria";
+"Laptop" = "Portatile";
+"CPU package" = "Package CPU";
+"Energy since app launch" = "Energia dalla batteria dall’avvio dell’app";
+"Renoir power limits" = "Limiti di potenza Renoir";
+"Measured / limit" = "Misurata / limite";
+"Firmware metrics unavailable" = "Metriche del firmware non disponibili";

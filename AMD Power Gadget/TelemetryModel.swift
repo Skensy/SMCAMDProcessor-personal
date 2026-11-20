@@ -74,6 +74,10 @@ final class TelemetryModel: ObservableObject {
     @Published var batteryIsCharging: Bool = false
     @Published var hasBattery: Bool = false
 
+    @Published private(set) var batteryDrain = BatteryDrain()
+    @Published private(set) var renoirPower: RenoirPowerMetrics?
+    private var lastPowerSample = Date.distantPast
+
     // Cache structures for performance optimization
     private var lastDiskIOCheck: Date = Date.distantPast
     private var cachedDiskIO: (read: UInt64, write: UInt64) = (0, 0)
@@ -1161,7 +1165,11 @@ final class TelemetryModel: ObservableObject {
         ramHistory.push(usedRAM)
         
         updateMemoryPressure()
-        getBatteryStatus()
+        if now.timeIntervalSince(lastPowerSample) >= 2 || now < lastPowerSample {
+            getBatteryStatus()
+            sampleLaptopPower(at: now)
+            lastPowerSample = now
+        }
 
         // Publishing full history array every tick is expensive for SwiftUI charts.
         // Light mode (menu bar only): refresh history less often.
@@ -1954,6 +1962,28 @@ final class TelemetryModel: ObservableObject {
         }
     }
     
+    private func sampleLaptopPower(at now: Date) {
+        let battery = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        var properties: Unmanaged<CFMutableDictionary>?
+        if battery != 0 {
+            IORegistryEntryCreateCFProperties(battery, &properties, kCFAllocatorDefault, 0)
+            IOObjectRelease(battery)
+        }
+        let info = properties?.takeRetainedValue() as? [String: Any]
+        let current = (info?["InstantAmperage"] ?? info?["Amperage"]) as? NSNumber
+        batteryDrain.sample(millivolts: (info?["Voltage"] as? NSNumber)?.intValue,
+                            milliamps: current.map { Int($0.int32Value) },
+                            externalPower: info?["ExternalConnected"] as? Bool,
+                            time: now.timeIntervalSinceReferenceDate)
+
+        guard sysInfo.cpuFamily == "17h", sysInfo.cpuModel == "60h" else { return }
+        let cpu = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AMDRyzenCPUPowerManagement"))
+        guard cpu != 0 else { renoirPower = nil; return }
+        defer { IOObjectRelease(cpu) }
+        let bytes = IORegistryEntryCreateCFProperty(cpu, "RenoirPowerMetrics" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Data
+        renoirPower = bytes.flatMap(RenoirPowerMetrics.init)
+    }
+
     private func getBatteryStatus() {
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return }
         guard let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef] else { return }

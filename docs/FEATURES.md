@@ -89,6 +89,12 @@ See [PRIVILEGE_AND_SECURITY.md](PRIVILEGE_AND_SECURITY.md) and [BOOT_ARGS.md](BO
 
 ---
 
+### Renoir and laptop power (3.35.0)
+
+The dashboard shows battery discharge in watts, CPU package power, and sampled battery energy in Wh since app launch. Charging, missing readings and gaps over 15 seconds do not contribute to the session total.
+
+On Family 17h Model 60h with the Renoir host bridge, the kext reads the firmware PM table while telemetry clients are active. The dashboard shows the measured power and limit for PPT Fast, PPT Slow and STAPM. Unknown table versions, rejected transfers and invalid samples display as unavailable. The kext sends telemetry requests only. The table protocol and field layout follow [RyzenAdj](https://github.com/FlyGoat/RyzenAdj/blob/44438e1/lib/api.c).
+
 ## Safety
 
 - First-launch disclaimer modal (`disclaimer_accepted`).  

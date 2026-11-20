@@ -307,6 +307,9 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
         // so reinitHwState() runs here on the workLoop thread, not the PM thread.
         if (provider->pendingReinit) {
             provider->pendingReinit = false;
+            provider->nextRenoirSampleNs = 0;
+            provider->renoirTableAddress = 0;
+            provider->removeProperty("RenoirPowerMetrics");
             provider->reinitHwState();
             sender->setTimeoutMS(provider->updateTimeInterval);
             return;
@@ -336,6 +339,8 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
         provider->read_msr(kMSR_PKG_C6_RES, &provider->packageC6Residency);
 
         IOLockUnlock(provider->rendezvousLock);
+
+        provider->updateRenoirPowerMetrics();
 
         uint32_t now = uint32_t(getCurrentTimeNs() / 1000000); //ms
         uint32_t newInt = max(now - provider->timeOfLastMissedRequest,
@@ -1180,7 +1185,7 @@ float AMDRyzenCPUPowerManagement::getCCDTemp(uint8_t ccd) {
     return temp;
 }
 
-uint32_t AMDRyzenCPUPowerManagement::smnRead32(uint32_t addr) {
+uint32_t AMDRyzenCPUPowerManagement::smnRead32(uint32_t addr, uint8_t port) {
     if (!fIOPCIDevice || !pciConfigLock) return 0;
 
 #pragma mark - SMN Access (smnRead32, smnWrite32)
@@ -1188,21 +1193,87 @@ uint32_t AMDRyzenCPUPowerManagement::smnRead32(uint32_t addr) {
     space.bits = 0x00;
     
     IOSimpleLockLock(pciConfigLock);
-    fIOPCIDevice->configWrite32(space, (UInt8)kFAMILY_17H_PCI_CONTROL_REGISTER, (UInt32)addr);
-    uint32_t val = fIOPCIDevice->configRead32(space, kFAMILY_17H_PCI_CONTROL_REGISTER + 4);
+    fIOPCIDevice->configWrite32(space, port, (UInt32)addr);
+    uint32_t val = fIOPCIDevice->configRead32(space, port + 4);
     IOSimpleLockUnlock(pciConfigLock);
     return val;
 }
 
-void AMDRyzenCPUPowerManagement::smnWrite32(uint32_t addr, uint32_t val) {
+void AMDRyzenCPUPowerManagement::smnWrite32(uint32_t addr, uint32_t val, uint8_t port) {
     if (!fIOPCIDevice || !pciConfigLock) return;
     IOPCIAddressSpace space;
     space.bits = 0x00;
     
     IOSimpleLockLock(pciConfigLock);
-    fIOPCIDevice->configWrite32(space, (UInt8)kFAMILY_17H_PCI_CONTROL_REGISTER, (UInt32)addr);
-    fIOPCIDevice->configWrite32(space, kFAMILY_17H_PCI_CONTROL_REGISTER + 4, (UInt32)val);
+    fIOPCIDevice->configWrite32(space, port, (UInt32)addr);
+    fIOPCIDevice->configWrite32(space, port + 4, (UInt32)val);
     IOSimpleLockUnlock(pciConfigLock);
+}
+
+// Renoir PSMU commands and table layout: FlyGoat/RyzenAdj, lib/api.c and lib/nb_smu_ops.c.
+bool AMDRyzenCPUPowerManagement::readRenoirPowerMetrics(float (&watts)[6]) {
+    constexpr uint8_t port = 0xB8;
+    constexpr uint32_t response = 0x3B10A80, argument = 0x3B10A88, message = 0x3B10A20;
+    auto request = [&](uint32_t command, uint32_t &result) {
+        if (smnRead32(response, port) == UINT32_MAX) return false;
+        smnWrite32(response, 0, port);
+        for (unsigned i = 0; i < 6; ++i) smnWrite32(argument + 4 * i, 0, port);
+        smnWrite32(message, command, port);
+        for (unsigned i = 0; i < 100; ++i) {
+            uint32_t reply = smnRead32(response, port);
+            if (reply == 1) {
+                result = smnRead32(argument, port);
+                return true;
+            }
+            if (reply != 0) break;
+            IODelay(10);
+        }
+        return false;
+    };
+
+    if (!renoirTableAddress) {
+        IOPCIAddressSpace root {};
+        if (fIOPCIDevice->configRead32(root, 0) != 0x16301022) return false;
+        uint32_t version = 0, address = 0;
+        if (!request(0x06, version) || version < 0x370000 || version > 0x370005)
+            return false;
+        if (!request(0x66, address) || address < 0x100000 || (address & 3) ||
+            address > UINT32_MAX - sizeof(watts))
+            return false;
+        renoirTableAddress = address;
+    }
+    uint32_t ignored = 0;
+    if (!request(0x65, ignored)) return false;
+
+    auto descriptor = IOMemoryDescriptor::withPhysicalAddress(renoirTableAddress, sizeof(watts), kIODirectionOut);
+    if (!descriptor) return false;
+    auto mapping = descriptor->map(kIOMapReadOnly);
+    descriptor->release();
+    if (!mapping) return false;
+    memcpy(watts, reinterpret_cast<const void *>(mapping->getVirtualAddress()), sizeof(watts));
+    mapping->release();
+    for (unsigned i = 0; i < 6; ++i) {
+        if (!(watts[i] >= 0 && watts[i] <= 500) || ((i % 2 == 0) && watts[i] == 0))
+            return false;
+    }
+    return true;
+}
+
+void AMDRyzenCPUPowerManagement::updateRenoirPowerMetrics() {
+    if (cpuFamily != 0x17 || cpuModel != 0x60 || !fIOPCIDevice || !pciConfigLock) return;
+    uint64_t now = getCurrentTimeNs();
+    if (now < nextRenoirSampleNs) return;
+    nextRenoirSampleNs = now + 3000000000ULL;
+    float watts[6];
+    if (timeOfLastMissedRequest && uint32_t(now / 1000000 - timeOfLastMissedRequest) < 10000) {
+        if (readRenoirPowerMetrics(watts)) {
+            setProperty("RenoirPowerMetrics", watts, sizeof(watts));
+            return;
+        }
+        renoirTableAddress = 0;
+        nextRenoirSampleNs = now + 30000000000ULL;
+    }
+    removeProperty("RenoirPowerMetrics");
 }
 
 int AMDRyzenCPUPowerManagement::smuSendCmd(uint32_t cmd, uint32_t arg) {

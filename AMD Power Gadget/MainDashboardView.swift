@@ -234,6 +234,9 @@ struct DashboardContentView: View {
                     
                     // CPU Profile Badge
                     CPUProfileBadgeView(model: model)
+                    if model.hasBattery || (model.sysInfo.cpuFamily == "17h" && model.sysInfo.cpuModel == "60h") {
+                        LaptopPowerCard(model: model)
+                    }
 
                 let verticalItems = verticalOrder.split(separator: ",").map(String.init)
                 ForEach(verticalItems, id: \.self) { itemId in

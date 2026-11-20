@@ -171,6 +171,28 @@ final class PrivilegeAndFanCurveTests: XCTestCase {
         XCTAssertEqual(AppChartStyle.normalized("Smooth Curves"), .line)
     }
 
+    func testBatteryDrainIntegratesOnlyContinuousDischarge() {
+        var drain = BatteryDrain()
+        for (time, ac) in [(0, false), (10, false), (11, true), (18, false), (80, false)] {
+            drain.sample(millivolts: 8000, milliamps: -2000, externalPower: ac, time: Double(time))
+            if ac { XCTAssertNil(drain.watts) }
+        }
+        XCTAssertEqual(drain.watts, 16)
+        XCTAssertEqual(drain.wattHours, 16 * 10 / 3600.0, accuracy: 0.000001)
+    }
+
+    func testRenoirTablePairsAndInvalidSamples() {
+        func decode(_ values: [Float]) -> RenoirPowerMetrics? {
+            values.withUnsafeBytes { RenoirPowerMetrics(Data($0)) }
+        }
+        let table = decode([35, 12, 55, 24, 45, 16])
+        XCTAssertEqual(table?.fast.measured, 24)
+        XCTAssertEqual(table?.slow.limit, 45)
+        XCTAssertNil(decode([0, 0, 55, 24, 45, 16]))
+        XCTAssertNil(decode([35, .nan, 55, 24, 45, 16]))
+        XCTAssertNil(decode([35, 12]))
+    }
+
     func testChartStyleMigrationRewritesUserDefaults() {
         let ud = UserDefaults(suiteName: "com.drogabox.tests.chartstyle.\(UUID().uuidString)")!
         ud.set("Histograma de Barras", forKey: AppChartStyle.storageKey)

@@ -473,8 +473,8 @@ private:
     /// first tick (workLoop thread) so reinitHwState() never runs on the PM thread.
     bool pendingReinit{false};
     
-    uint32_t smnRead32(uint32_t addr);
-    void smnWrite32(uint32_t addr, uint32_t val);
+    uint32_t smnRead32(uint32_t addr, uint8_t port = kFAMILY_17H_PCI_CONTROL_REGISTER);
+    void smnWrite32(uint32_t addr, uint32_t val, uint8_t port = kFAMILY_17H_PCI_CONTROL_REGISTER);
     int smuSendCmd(uint32_t cmd, uint32_t arg);
 
     struct SMUMailbox {
@@ -486,6 +486,11 @@ private:
     };
     SMUMailbox smuMailbox{};
     
+    uint64_t nextRenoirSampleNs {0};
+    uint32_t renoirTableAddress {0};
+    void updateRenoirPowerMetrics();
+    bool readRenoirPowerMetrics(float (&watts)[6]);
+
     void initWorkLoop();
     void stopWorkLoop();
     void resumeWorkLoop();

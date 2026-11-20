@@ -8,6 +8,48 @@ import Foundation
 // MARK: - Data Structures
 
 
+struct BatteryDrain {
+    private(set) var watts: Double?
+    private(set) var wattHours = 0.0
+    private var previousTime: TimeInterval?
+
+    mutating func sample(millivolts: Int?, milliamps: Int?, externalPower: Bool?, time: TimeInterval) {
+        guard externalPower == false, let mv = millivolts, (1...60000).contains(mv),
+              let ma = milliamps, (-30000...0).contains(ma) else {
+            previousTime = nil
+            watts = nil
+            return
+        }
+        let current = Double(-ma * mv) / 1_000_000
+        if let last = previousTime, let previous = watts {
+            let seconds = time - last
+            if seconds > 0 && seconds <= 15 {
+                wattHours += (previous + current) * 0.5 * seconds / 3600
+            }
+        }
+        watts = current
+        previousTime = time
+    }
+}
+
+struct RenoirPowerMetrics {
+    let stapm: (limit: Float, measured: Float)
+    let fast: (limit: Float, measured: Float)
+    let slow: (limit: Float, measured: Float)
+
+    init?(_ data: Data) {
+        var values = [Float](repeating: 0, count: 6)
+        guard data.count == values.count * MemoryLayout<Float>.size else { return nil }
+        _ = values.withUnsafeMutableBytes { data.copyBytes(to: $0) }
+        guard values.enumerated().allSatisfy({ i, v in
+            v.isFinite && (0...500).contains(v) && (i % 2 == 1 || v > 0)
+        }) else { return nil }
+        stapm = (values[0], values[1])
+        fast = (values[2], values[3])
+        slow = (values[4], values[5])
+    }
+}
+
 struct CoreSnapshot: Identifiable {
     let id: Int
     var freqMHz: Float

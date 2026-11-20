@@ -146,3 +146,44 @@ struct MemoryCard: View {
         }
     }
 }
+
+
+struct LaptopPowerCard: View {
+    @ObservedObject var model: TelemetryModel
+
+    var body: some View {
+        TahoeCard(accent: .tahoeCardBorder) {
+            VStack(alignment: .leading, spacing: 6) {
+                if model.hasBattery {
+                    Text("Battery discharge").font(.headline)
+                    row("Laptop", model.batteryDrain.watts.map { String(format: "%.1f W", $0) } ?? "—")
+                    row("CPU package", String(format: "%.1f W", model.cpuWatts))
+                    row("Energy since app launch", String(format: "%.3f Wh", model.batteryDrain.wattHours))
+                }
+                if model.sysInfo.cpuFamily == "17h" && model.sysInfo.cpuModel == "60h" {
+                    Text("Renoir power limits").font(.headline)
+                    if let power = model.renoirPower {
+                        Text("Measured / limit").font(.caption)
+                        row("PPT Fast", format(power.fast))
+                        row("PPT Slow", format(power.slow))
+                        row("STAPM", format(power.stapm))
+                    } else {
+                        Text("Firmware metrics unavailable").font(.caption)
+                    }
+                }
+            }
+        }
+    }
+
+    private func format(_ power: (limit: Float, measured: Float)) -> String {
+        String(format: "%.1f / %.1f W", power.measured, power.limit)
+    }
+
+    private func row(_ label: LocalizedStringKey, _ value: String) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(verbatim: value).monospacedDigit()
+        }
+    }
+}
