@@ -6,6 +6,7 @@
 //
 
 #include "pmAMDRyzen.h"
+#include "PStatePolicy.h"
 
 #include <pexpert/pexpert.h>
 
@@ -25,11 +26,14 @@ pmRyzen_idle_strategy_t pmRyzen_idle_strategy = PMRYZEN_IDLE_STRATEGY_SIMPLE;
 
 uint64_t pmRyzen_exit_idle_false_c;
 
-uint64_t pmRyzen_p_sdtsc;
-uint64_t pmRyzen_p_sutsc;
+static uint8_t pmRyzen_enabled_pstates;
+
+void pmRyzen_update_pstate_mask(uint8_t mask) {
+    __atomic_store_n(&pmRyzen_enabled_pstates, mask, __ATOMIC_RELAXED);
+}
 
 uint32_t pmRyzen_hpcpus = 0;
-volatile uint32_t pmRyzen_pstatelimit;
+uint32_t pmRyzen_pstatelimit;
 
 void(*pmRyzen_pmUnRegister)(pmDispatch_t*) = 0;
 void(*pmRyzen_cpu_NMI)(int) = 0;
@@ -90,6 +94,7 @@ void pmRyzen_init_PState(void){
     float p0spd = ((float)(p0 & 0xff) / (float)p0dfsid) * 200.0f;
     
     uint64_t p1 = pmRyzen_rdmsr_safe(pmRyzen_io_service_handle, MSR_PSTATE_0 + 1);
+    if (!(p1 & (1ULL << 63)) || ((p1 >> 8) & 0x3f) == 0) return;
     uint32_t fid_raw = (uint32_t)((p0spd * p1_ratio) / 200.0f * (float)((p1 >> 8) & 0x3f));
     if (fid_raw > 0xFF) fid_raw = 0xFF;
     uint64_t p1fid = (uint64_t)fid_raw;
@@ -97,34 +102,34 @@ void pmRyzen_init_PState(void){
     pmRyzen_wrmsr_safe(pmRyzen_io_service_handle, MSR_PSTATE_0 + 1, (p1 & ~0xFFULL) | p1fid | (1ULL << 63));
 }
 
-inline void set_PState(pmProcessor_t *cpu, uint8_t state){
-    if(pmRyzen_pstatelimit == 0) return;
-    if (state >= 8) state = 7;
-    state = min((uint8_t)pmRyzen_pstatelimit, state);
-    if(cpu->PState == state) return;
-    
-    boolean_t from_hpstate = !cpu->PState;
-    
-    pmRyzen_wrmsr_safe(pmRyzen_io_service_handle, MSR_PSTATE_CTL, state);
+// Called locally with interrupts disabled; account only successful MSR transitions.
+void pmRyzen_record_pstate(uint32_t cn, uint8_t state) {
+    pmProcessor_t *cpu = &pmRyzen_cpus[cn];
+    if (cpu->PState == state) return;
+    if (state == 0) __atomic_fetch_add(&pmRyzen_hpcpus, 1, __ATOMIC_RELAXED);
+    else if (cpu->PState == 0) __atomic_fetch_sub(&pmRyzen_hpcpus, 1, __ATOMIC_RELAXED);
     cpu->PState = state;
-    
-    if(!state){
-        __asm__ volatile("lock incl (%0)"::"r"(&pmRyzen_hpcpus):"memory");
-    } else if(from_hpstate) {
-        __asm__ volatile("lock decl (%0)"::"r"(&pmRyzen_hpcpus):"memory");
-    }
 }
 
-void pmRyzen_doPState_reset(void *arg){
+static void set_PState(uint32_t cn, uint8_t state, bool force) {
+    if (!pmRyzen_get_limit() || state >= 8) return;
+    if (!(__atomic_load_n(&pmRyzen_enabled_pstates, __ATOMIC_RELAXED) & (1U << state))) return;
+    if (!force && pmRyzen_cpus[cn].PState == state) return;
+    if (pmRyzen_wrmsr_safe(pmRyzen_io_service_handle, MSR_PSTATE_CTL, state))
+        pmRyzen_record_pstate(cn, state);
+}
+
+static void pmRyzen_doPState_reset(void *arg) {
     uint32_t cn = cpu_number();
-    pmProcessor_t *self = &pmRyzen_cpus[cn];
-    self->PState = 8;
-    set_PState(self, 0);
+    if (cn >= XNU_MAX_CPU) return;
+    pmProcessor_t *cpu = &pmRyzen_cpus[cn];
+    cpu->ll_count = 0;
+    cpu->eff_timeacc = cpu->eff_idleacc = 0;
+    cpu->last_start_tsc = cpu->cpu_awake ? rdtsc64() : 0;
+    set_PState(cn, 0, true);
 }
 
-void pmRyzen_PState_reset(void){
-    pmRyzen_hpcpus = 0;
-    if(pmRyzen_pstatelimit == 0) pmRyzen_pstatelimit = 1;
+void pmRyzen_PState_reset(void) {
     mp_rendezvous_no_intrs(&pmRyzen_doPState_reset, NULL);
 }
 
@@ -168,7 +173,7 @@ void pmRyzen_init(void *handle, int allowDispatch){
     pmRyzen_num_phys = 0;
     pmRyzen_num_logi = 0;
     pmRyzen_hpcpus = 0;
-    pmRyzen_pstatelimit = PSTATE_LIMIT;
+    pmRyzen_set_limit(PSTATE_LIMIT);
     
     while(pkg){
         pkgCount++;
@@ -194,6 +199,7 @@ void pmRyzen_init(void *handle, int allowDispatch){
                 
                 pmProcessor_t *cpu = &pmRyzen_cpus[lcpu->cpu_num];
                 cpu->lcpu = lcpu;
+                cpu->PState = 8; // No successful request recorded yet.
                 cpu->stat_exit_idle = 0;
                 cpu->arm_flag = 0;
                 cpu->cpu_awake = 1;
@@ -210,12 +216,13 @@ void pmRyzen_init(void *handle, int allowDispatch){
 
     
     pmRyzen_effective_timetsc = ((double)pmRyzen_tsc_freq * EFF_INTERVAL);
-    pmRyzen_p_sdtsc = (uint64_t)((double)pmRyzen_effective_timetsc * PSTATE_STEPDOWN_THRE);
-    pmRyzen_p_sutsc = (uint64_t)((double)pmRyzen_effective_timetsc * PSTATE_STEPUP_THRE);
-    
-    pmRyzen_init_PState();
-    pmRyzen_PState_reset();
-    
+    if (allowDispatch) {
+        pmRyzen_init_PState();
+        pmRyzen_PState_reset();
+    } else {
+        pmRyzen_set_limit(0);
+    }
+
     cb.initComplete();
 }
 
@@ -259,6 +266,18 @@ float pmRyzen_avgload_pcpu(uint32_t cpu){
 }
 
 
+// Called on the target CPU by the existing interrupt-disabled telemetry rendezvous.
+// An IPI waking a halted CPU arrives while cpu_awake is still false.
+void pmRyzen_check_busy_cpu(uint32_t cn) {
+    if (cn >= XNU_MAX_CPU || pmRyzen_get_limit() == 0) return;
+    pmProcessor_t *cpu = &pmRyzen_cpus[cn];
+    if (cpu->cpu_awake && cpu->PState && cpu->PState < 8 &&
+        pmRyzen_busy_for_window(rdtsc64(), cpu->last_start_tsc, pmRyzen_effective_timetsc)) {
+        set_PState(cn, 0, false);
+        cpu->ll_count = 0;
+    }
+}
+
 volatile uint32_t pmRyzen_last_woken_cpu=0;
 //uint32_t pmRyzen_last_idle_cpu=0;
 uint64_t pmRyzen_machine_idle(uint64_t maxDur){
@@ -267,7 +286,7 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
     
     uint32_t cn = cpu_number();
     if (cn >= XNU_MAX_CPU) {
-        __asm__ volatile("sti;hlt;");
+        __asm__ volatile("sti;hlt;cli" ::: "memory");
         return 0;
     }
     pmProcessor_t *self = &pmRyzen_cpus[cn];
@@ -284,7 +303,7 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
     // Only idle strategy: sti; hlt — safe on all AMD CPUs.
     // Intel-style MONITOR/MWAIT was removed (unsafe on AMD).
     // AMD MONITORX/MWAITX may be added as a future enhancement.
-    __asm__ volatile("sti;hlt;");
+    __asm__ volatile("sti;hlt;cli" ::: "memory");
 
     
     self->cpu_awake = 1;
@@ -294,33 +313,34 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
     
     tscnow = rdtsc64();
 
+    if (tscnow < self->last_idle_tsc) {
+        self->eff_timeacc = self->eff_idleacc = 0;
+        self->last_start_tsc = tscnow;
+        return 0;
+    }
     uint64_t tscela = tscnow - self->last_idle_tsc;
-    self->eff_timeacc += tscnow - self->last_start_tsc;
+    uint64_t start = self->last_start_tsc;
+    if (!start || start > self->last_idle_tsc) start = self->last_idle_tsc;
+    self->eff_timeacc += tscnow - start;
     self->eff_idleacc += tscela;
 
     if(self->eff_timeacc > pmRyzen_effective_timetsc){
-        // Removed: float-based eff_load replaced by integer threshold comparison (avoids FPU in kernel)
-        uint64_t rt = self->eff_timeacc - self->eff_idleacc;
-        
-        //Avoid using xmm registers shared within same core.
-        if(rt > pmRyzen_p_sutsc){
-            set_PState(self, 0);
+        int direction = pmRyzen_load_direction(self->eff_timeacc, self->eff_idleacc);
+        if (direction > 0) {
+            set_PState(cn, 0, false);
             self->ll_count = 0;
-        } else if(rt < pmRyzen_p_sdtsc){
-            self->ll_count++;
-            if(self->ll_count > PSTATE_STEPDOWN_TIME + pmRyzen_hpcpus * PSTATE_STEPDOWN_MP_GAIN){
+        } else if (direction < 0 && pmRyzen_get_limit()) {
+            if (++self->ll_count > PSTATE_STEPDOWN_TIME + __atomic_load_n(&pmRyzen_hpcpus, __ATOMIC_RELAXED) * PSTATE_STEPDOWN_MP_GAIN) {
                 self->ll_count = 0;
-                set_PState(self, self->PState+1);
+                uint8_t mask = __atomic_load_n(&pmRyzen_enabled_pstates, __ATOMIC_RELAXED);
+                set_PState(cn, pmRyzen_next_lower(mask, self->PState, pmRyzen_get_limit()), false);
             }
         }
-        
+
         self->eff_idleaccd = self->eff_idleacc;
         self->eff_timeaccd = self->eff_timeacc;
         self->eff_timeacc = 0;
         self->eff_idleacc = 0;
-
-        
-        // Removed: float-based eff_load P-state stepping replaced by integer threshold comparison above.
 
     }
 

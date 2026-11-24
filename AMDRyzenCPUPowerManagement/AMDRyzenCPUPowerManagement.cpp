@@ -29,8 +29,8 @@ uint32_t ADDPR(debugPrintDelay) = 0;
 
 
 extern "C"{
-void pmRyzen_wrmsr_safe(void *handle, uint32_t addr, uint64_t value){
-    static_cast<AMDRyzenCPUPowerManagement*>(handle)->write_msr(addr, value);
+bool pmRyzen_wrmsr_safe(void *handle, uint32_t addr, uint64_t value){
+    return static_cast<AMDRyzenCPUPowerManagement*>(handle)->write_msr(addr, value);
 }
 
 uint64_t pmRyzen_rdmsr_safe(void *handle, uint32_t addr){
@@ -310,7 +310,19 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
             provider->nextRenoirSampleNs = 0;
             provider->renoirTableAddress = 0;
             provider->removeProperty("RenoirPowerMetrics");
+            IOLockLock(provider->rendezvousLock);
             provider->reinitHwState();
+            if (provider->manualPStateRequested &&
+                provider->applyPowerControlLocked(provider->PStateCtl) != kIOReturnSuccess) {
+                IOLog("AMDRyzenCPUPowerManagement: manual P-state unavailable on wake, resuming automatic control\n");
+                provider->manualPStateRequested = false;
+                pmRyzen_set_limit(PSTATE_LIMIT);
+            }
+            if (provider->pmDispatchAllowed && pmRyzen_get_limit()) {
+                pmRyzen_PState_reset();
+                provider->PStateCtl = 0;
+            }
+            IOLockUnlock(provider->rendezvousLock);
             sender->setTimeoutMS(provider->updateTimeInterval);
             return;
         }
@@ -320,6 +332,7 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
             auto provider = static_cast<AMDRyzenCPUPowerManagement*>(obj);
             uint32_t cpu_num = cpu_number();
 
+            if (provider->pmDispatchAllowed) pmRyzen_check_busy_cpu(cpu_num);
             provider->updateInstructionDelta(cpu_num);
 
             // Ignore hyper-threaded cores
@@ -1055,26 +1068,60 @@ void AMDRyzenCPUPowerManagement::updateInstructionDelta(uint8_t cpu_num){
 //    loadIndex_PerCore[cpu_num] = log10f(min(index,1) * growth) / log10f(growth);
 }
 
-void AMDRyzenCPUPowerManagement::applyPowerControl(){
-    // Legacy P-state writes are controlled per CPU profile.
-
-#pragma mark - SMU Mailbox Commands
-    // Enabled on Zen 1/2 (full PM dispatch), disabled on Zen 3+ (telemetry-only).
-    if (!legacyPstateAllowed) {
-        if (cppcActiveMode) {
-            IOLog("AMDRyzenCPUPowerManagement::applyPowerControl ignored - CPPC Active Mode active\n");
-        } else {
-            IOLog("AMDRyzenCPUPowerManagement::applyPowerControl ignored - legacy P-state disabled for this profile\n");
-        }
-        return;
-    }
-    
+IOReturn AMDRyzenCPUPowerManagement::applyPowerControl(uint64_t state) {
     IOLockLock(rendezvousLock);
-    mp_rendezvous(nullptr, [](void *obj) {
-        auto provider = static_cast<AMDRyzenCPUPowerManagement*>(obj);
-        provider->write_msr(kMSR_PSTATE_CTL, (uint64_t)(provider->PStateCtl & 0x7));
-    }, nullptr, this);
+    IOReturn status = serviceInitialized ? applyPowerControlLocked(state) : kIOReturnNotReady;
     IOLockUnlock(rendezvousLock);
+    return status;
+}
+
+IOReturn AMDRyzenCPUPowerManagement::applyPowerControlLocked(uint64_t state) {
+    if (!legacyPstateAllowed) return kIOReturnUnsupported;
+    if (state >= kMSR_PSTATE_LEN) return kIOReturnBadArgument;
+    if (!(PStateDef_perCore[state] & (1ULL << 63))) {
+        return kIOReturnBadArgument;
+    }
+    struct Request {
+        AMDRyzenCPUPowerManagement *provider;
+        uint8_t state;
+        uint8_t previous[XNU_MAX_CPU];
+        bool changed[XNU_MAX_CPU];
+        uint32_t failed;
+    } req {this, static_cast<uint8_t>(state)};
+    // Pause the governor before the all-CPU barrier. On failure restore each
+    // changed CPU's previous request before allowing automatic stepping again.
+    const uint32_t oldLimit = pmRyzen_get_limit();
+    pmRyzen_set_limit(0);
+    mp_rendezvous_no_intrs([](void *obj) {
+        auto *r = static_cast<Request *>(obj);
+        uint32_t cn = cpu_number();
+        uint64_t previous = 0, definition = 0;
+        if (cn >= XNU_MAX_CPU ||
+            !r->provider->read_msr(kMSR_PSTATE_CTL, &previous) ||
+            !r->provider->read_msr(kMSR_PSTATE_0 + r->state, &definition) ||
+            !(definition & (1ULL << 63)) ||
+            !r->provider->write_msr(kMSR_PSTATE_CTL, r->state)) {
+            __atomic_store_n(&r->failed, 1U, __ATOMIC_RELAXED);
+            return;
+        }
+        r->previous[cn] = previous & 7;
+        r->changed[cn] = true;
+        pmRyzen_record_pstate(cn, r->state);
+    }, &req);
+    if (req.failed) {
+        mp_rendezvous_no_intrs([](void *obj) {
+            auto *r = static_cast<Request *>(obj);
+            uint32_t cn = cpu_number();
+            if (cn < XNU_MAX_CPU && r->changed[cn] &&
+                r->provider->write_msr(kMSR_PSTATE_CTL, r->previous[cn]))
+                pmRyzen_record_pstate(cn, r->previous[cn]);
+        }, &req);
+        pmRyzen_set_limit(oldLimit);
+    } else {
+        PStateCtl = req.state;
+        manualPStateRequested = true;
+    }
+    return req.failed ? kIOReturnIOError : kIOReturnSuccess;
 }
 
 void AMDRyzenCPUPowerManagement::applyEPPControl() {
@@ -1439,10 +1486,13 @@ void AMDRyzenCPUPowerManagement::dumpPstate(){
 
 #pragma mark - P-State & Debug
     uint8_t len = 0;
+    uint8_t enabledMask = 0;
     for (uint32_t i = 0; i < kMSR_PSTATE_LEN; i++) {
         uint64_t msr_value_buf = 0;
         bool err = !read_msr(kMSR_PSTATE_0 + i, &msr_value_buf);
         if (err) {
+            PStateDef_perCore[i] = 0;
+            PStateDefClock_perCore[i] = 0;
             IOLog("AMDRyzenCPUPowerManagement::dumpPstate failed to read MSR 0xC0010064\n");
             continue;
         }
@@ -1475,7 +1525,10 @@ void AMDRyzenCPUPowerManagement::dumpPstate(){
         PStateDef_perCore[i] = msr_value_buf;
         PStateDefClock_perCore[i] = clock;
         
-        if(msr_value_buf & ((uint64_t)1 << 63)) len++;
+        if (msr_value_buf & (1ULL << 63)) {
+            enabledMask |= 1U << i;
+            ++len;
+        }
         //        IOLog("a: %llu", msr_value_buf);
     }
     
@@ -1489,6 +1542,7 @@ void AMDRyzenCPUPowerManagement::dumpPstate(){
     }
     
     PStateEnabledLen = len;
+    pmRyzen_update_pstate_mask(enabledMask);
 }
 
 void AMDRyzenCPUPowerManagement::reinitHwState() {
@@ -1632,20 +1686,24 @@ bool AMDRyzenCPUPowerManagement::initSuperIO(uint16_t *chipIntel){
 }
 
 uint32_t AMDRyzenCPUPowerManagement::getPMPStateLimit(){
-    return pmRyzen_pstatelimit;
+    return pmRyzen_get_limit();
 }
 
 void AMDRyzenCPUPowerManagement::setPMPStateLimit(uint32_t state){
-    if (!this) return;
+    if (!pmDispatchAllowed) return;
+    IOLockLock(rendezvousLock);
     uint32_t safeState = min(2U, state);
-    pmRyzen_pstatelimit = safeState;
+    pmRyzen_set_limit(safeState);
     if(safeState > 0){
+        manualPStateRequested = false;
         pmRyzen_PState_reset();
+        PStateCtl = 0;
     }
+    IOLockUnlock(rendezvousLock);
 }
 
 uint32_t AMDRyzenCPUPowerManagement::getHPcpus(){
-    return pmRyzen_hpcpus;
+    return __atomic_load_n(&pmRyzen_hpcpus, __ATOMIC_RELAXED);
 }
 
 void AMDRyzenCPUPowerManagement::evaluateFanCurves() {

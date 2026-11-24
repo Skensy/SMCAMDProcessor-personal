@@ -38,16 +38,11 @@ actor ProcessorModel {
     private var lastMLoad : Double = 0
 
     private var PStateDef : [UInt64] = []
-    private var PStateCur : Int = 0
     private var instructionDelta : [UInt64] = []
     private var loadIndex : [Float] = []
     private var previousCpuLoadInfo : [processor_cpu_load_info] = []
-    private var PStateDefClock : [Float] = []
-    private var validPStateLength : Int = 0
-    private var emulatedPState : Int = 0
-    private var isEmulatingPStates : Bool = false
-    private var emulatedPStateDefClock : [Float] = []
-    
+    private(set) var speedSteps: [LegacySpeedStep] = []
+
     // Performance optimization: cache for expensive kernel calls
     private var cachedGPUStats: (temp: Float, power: Float, util: Float, vram: Float, fan: Float, lastUpdate: Date) = (0, 0, 0, 0, 0, .distantPast)
     private let gpuStatsCacheInterval: TimeInterval = 0.5 // Update GPU stats every 500ms
@@ -213,7 +208,6 @@ actor ProcessorModel {
         loadMetric()
         loadSystemConfig()
         loadPStateDef()
-        loadPStateDefClock()
 
         if numberOfCores < 1 {
             await MainActor.run {
@@ -410,7 +404,6 @@ actor ProcessorModel {
         numberOfCores = Int(scalerOut)
         let endIdx = min(numberOfCores + 2, outputStr.count - 1)
         cachedMetric = outputStr.count > 0 && endIdx >= 0 ? Array(outputStr[0...endIdx]) : []
-        if outputStr.count > 2 { PStateCur = Int(outputStr[2]) }
 
 
         lastMLoad = NSDate().timeIntervalSince1970
@@ -466,15 +459,7 @@ actor ProcessorModel {
     private func loadPStateDef(){
 
         PStateDef = kernelGetUInt64(count: 8, selector: 0)
-        var i = 0
-        while i < PStateDef.count {
-            if (PStateDef[i] & 0x8000000000000000) == 0 { //LOL Swift
-                break
-            }
-            i += 1
-        }
-        validPStateLength = i
-
+        speedSteps = LegacySpeedStep.choices(definitions: PStateDef, family: cpuidBasic.first ?? 0)
     }
 
     private func loadCPUID(){
@@ -504,152 +489,53 @@ actor ProcessorModel {
 
     }
 
-    private func loadPStateDefClock(){
-        // Si ya estamos en modo de emulación, no volver a leer del kernel.
-        // Los valores emulados son estáticos y correctos para toda la sesión.
-        if isEmulatingPStates {
-            PStateDefClock = emulatedPStateDefClock
-            return
-        }
-
-        PStateDefClock = kernelGetFloats(count: 10, selector: 1)
-
-        // Sanitizar valores NaN/Inf del kernel (CpuDfsId=0 produce NaN en la división)
-        for i in 0..<PStateDefClock.count {
-            if PStateDefClock[i].isNaN || PStateDefClock[i].isInfinite {
-                PStateDefClock[i] = 0.0
-            }
-        }
-
-        // If we detect only one (or zero) legacy P-states due to UEFI/BIOS behavior on Zen 3,
-        // activate permanent emulation mode for this session.
-        if validPStateLength <= 1 {
-            var baseClock: Float = 0.0
-            if PStateDefClock.count > 0 && PStateDefClock[0] > 1000.0 {
-                baseClock = PStateDefClock[0]
-            }
-
-            // If baseClock is invalid, derive it from the CPU brand string
-            if baseClock < 1000.0 {
-                let cpuBrand = ProcessorModel.sysctlString(key: "machdep.cpu.brand_string").lowercased()
-                if let range = cpuBrand.range(of: #"(\d+\.\d+)\s*ghz"#, options: .regularExpression) {
-                    let ghzStr = cpuBrand[range].replacingOccurrences(of: "ghz", with: "").trimmingCharacters(in: .whitespaces)
-                    if let ghz = Float(ghzStr) {
-                        baseClock = ghz * 1000.0
-                    }
-                }
-                if baseClock < 1000.0 {
-                    if cpuBrand.contains("5900xt") { baseClock = 3300.0 }
-                    else if cpuBrand.contains("5950x") { baseClock = 3400.0 }
-                    else if cpuBrand.contains("5900x") { baseClock = 3700.0 }
-                    else if cpuBrand.contains("5800x") { baseClock = 3800.0 }
-                    else if cpuBrand.contains("5600x") { baseClock = 3700.0 }
-                    else { baseClock = 3300.0 }
-                }
-            }
-
-            var maxBoost: Float = baseClock + 1000.0
-            let cpuBrand = ProcessorModel.sysctlString(key: "machdep.cpu.brand_string").lowercased()
-            if cpuBrand.contains("5900xt") || cpuBrand.contains("5950x") {
-                maxBoost = 4900.0
-            } else if cpuBrand.contains("5900x") || cpuBrand.contains("5800x") || cpuBrand.contains("5700x") {
-                maxBoost = 4800.0
-            } else if cpuBrand.contains("5600x") || cpuBrand.contains("5600g") {
-                maxBoost = 4600.0
-            } else if cpuBrand.contains("3900x") || cpuBrand.contains("3950x") {
-                maxBoost = 4600.0
-            } else if cpuBrand.contains("3800x") || cpuBrand.contains("3700x") {
-                maxBoost = 4500.0
-            } else if cpuBrand.contains("3600") {
-                maxBoost = 4200.0
-            }
-
-            if maxBoost <= baseClock {
-                maxBoost = baseClock + 1000.0
-            }
-
-            let step5 = maxBoost
-            let step4 = baseClock + (maxBoost - baseClock) * 0.5
-            let step3 = baseClock
-            let step2 = Float(2800.0)
-            let step1 = Float(2200.0)
-
-            PStateDefClock = [step5, step4, step3, step2, step1, 0.0, 0.0, 0.0, 0.0, 0.0]
-            emulatedPStateDefClock = PStateDefClock
-            validPStateLength = 5
-            isEmulatingPStates = true
-        }
-    }
-
-    func refreshPStateDef() {
-        loadPStateDefClock()
-    }
-
     nonisolated func getHPCpus() -> Int{
         let o = kernelGetUInt64(count: 1, selector: 17)
         return o.count > 0 ? Int(o[0]) : 0
     }
 
     @discardableResult
-    func setPState(state : Int) -> kern_return_t {
-        // If we are in emulation mode (hardware reports only 1 P-state but we expose 5 in the GUI)
-        if PStateDef.count > 1 && (PStateDef[1] & 0x8000000000000000) == 0 {
-            // Smart mapping to real hardware controls in Zen 3 — surface first privilege failure
-            var status: kern_return_t = KERN_SUCCESS
-            switch state {
-            case 0, 1: // Boost / High Performance
-                status = setCPB(enabled: true)
-                if status == KERN_SUCCESS { status = setLPM(enabled: false) }
-                if status == KERN_SUCCESS { status = setPPM(enabled: true) }
-            case 2: // Base Clock
-                status = setCPB(enabled: false)
-                if status == KERN_SUCCESS { status = setLPM(enabled: false) }
-                if status == KERN_SUCCESS { status = setPPM(enabled: true) }
-            case 3: // Balanced / Low-Medium
-                status = setCPB(enabled: false)
-                if status == KERN_SUCCESS { status = setLPM(enabled: false) }
-                if status == KERN_SUCCESS { status = setPPM(enabled: true) }
-            case 4: // LPM / Idle
-                status = setCPB(enabled: false)
-                if status == KERN_SUCCESS { status = setLPM(enabled: true) }
-            default:
-                break
+    func setSpeedStep(_ step: LegacySpeedStep) -> kern_return_t {
+        guard speedSteps.contains(step), isLegacyPStateSupported else { return kIOReturnUnsupported }
+        switch step {
+        case .automatic: return setPPM(enabled: true)
+        case let .hardware(id, _):
+            // Older kexts accept selector 10 without pausing their governor.
+            if AMDRyzenCPUPowerManagementVersion.compare("3.35.1", options: .numeric) == .orderedAscending && getPPM() {
+                let wasLowPower = getLPM()
+                let paused = setPPM(enabled: false)
+                guard paused == KERN_SUCCESS else { return paused }
+                let status = kernelSetUInt64Status(selector: 10, args: [UInt64(id)])
+                if status != KERN_SUCCESS {
+                    if wasLowPower { _ = setLPM(enabled: true) }
+                    else { _ = setPPM(enabled: true) }
+                }
+                return status
             }
-            if status == KERN_SUCCESS {
-                emulatedPState = state
-            } else {
-                logKernelError(status)
-            }
-            return status
+            return kernelSetUInt64Status(selector: 10, args: [UInt64(id)])
+        case .boost, .base, .lowPower:
+            let previousBoost = getCPB().last
+            let status = setCPB(enabled: step == .boost)
+            guard status == KERN_SUCCESS else { return status }
+            let mode = setLPM(enabled: step == .lowPower)
+            if mode != KERN_SUCCESS, let previousBoost { _ = setCPB(enabled: previousBoost) }
+            return mode
         }
-
-        var input: [UInt64] = [UInt64(state)]
-        let res = IOConnectCallMethod(connect, 10, &input, 1, nil, 0,
-                                      nil, nil,
-                                      nil, nil)
-
-        if res != KERN_SUCCESS {
-            logKernelError(res)
-        }
-        return res
     }
 
-    func getPState() -> Int {
-        if PStateDef.count > 1 && (PStateDef[1] & 0x8000000000000000) == 0 {
-            let lpm = getLPM()
-            let cpb = getCPB() // devuelve [cpbSupported, cpbEnabled]
-
-            if lpm {
-                return 4 // LPM / Idle
-            } else if cpb.count > 1 && !cpb[1] {
-                return 2 // Base Clock (CPB desactivado)
-            } else {
-                // If CPB is active, return the last emulated selection (0, 1, or 3)
-                // otherwise default to 0 (Boost)
-                return emulatedPState == 4 || emulatedPState == 2 ? 0 : emulatedPState
+    func getSpeedStep() -> LegacySpeedStep? {
+        guard !speedSteps.isEmpty else { return nil }
+        if speedSteps.contains(.automatic) {
+            if getPPM() { return .automatic }
+            guard let selected = kernelGetUInt64(count: 1, selector: 9).first else { return nil }
+            return speedSteps.first { step in
+                if case let .hardware(id, _) = step { return UInt64(id) == selected }
+                return false
             }
         }
-        return PStateCur
+        if getLPM() { return .lowPower }
+        guard let boost = getCPB().last else { return nil }
+        return boost ? .boost : .base
     }
 
     nonisolated func getCPPCActiveMode() -> (active: Bool, epp: UInt8) {
@@ -675,14 +561,6 @@ actor ProcessorModel {
 
     func getPStateDef() -> [UInt64]{
         return PStateDef
-    }
-
-    func getValidPStateClocks() -> [Float] {
-        if validPStateLength <= 0 || PStateDefClock.isEmpty {
-            return [3300.0] // Safe fallback: return at least one valid value
-        }
-        let len = min(validPStateLength, PStateDefClock.count)
-        return Array(PStateDefClock[0...len-1])
     }
 
     func getMetric(forced : Bool) -> [Float] {
@@ -756,7 +634,6 @@ actor ProcessorModel {
         }
 
         loadPStateDef()
-        loadPStateDefClock()
         return 0
     }
 
@@ -825,44 +702,26 @@ actor ProcessorModel {
 
     // MARK: - GPU Statistics (from IOAccelerator PerformanceStatistics)
 
-    /// Reads a numeric value from the IOAccelerator PerformanceStatistics dictionary.
-    private func getIOAcceleratorStat(key: String) -> Float {
-        var iter: io_iterator_t = 0
-        let err = IOServiceGetMatchingServices(kIOMainPortDefault,
-                                              IOServiceMatching("IOAccelerator"), &iter)
-        if err != kIOReturnSuccess { return 0 }
-        defer { IOObjectRelease(iter) }
-
-        while true {
-            let reg = IOIteratorNext(iter)
-            if reg == 0 { break }
-            defer { IOObjectRelease(reg) }
-
-            if let dict = IORegistryEntryCreateCFProperty(reg, "PerformanceStatistics" as CFString,
-                                                         kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any] {
-                if let v = dict[key] as? NSNumber { return v.floatValue }
-                if let v = dict[key] as? Int      { return Float(v) }
-            }
-        }
-        return 0
-    }
-
-    /// Optimized GPU stats with caching to reduce IOAccelerator queries
     private func updateGPUStatsCache() {
         let now = Date()
-        if now.timeIntervalSince(cachedGPUStats.lastUpdate) < gpuStatsCacheInterval {
-            return
+        guard now.timeIntervalSince(cachedGPUStats.lastUpdate) >= gpuStatsCacheInterval else { return }
+        var iter: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &iter) == KERN_SUCCESS else { return }
+        defer { IOObjectRelease(iter) }
+
+        var values = GPUStatistics()
+        while !values.complete {
+            let service = IOIteratorNext(iter)
+            guard service != 0 else { break }
+            defer { IOObjectRelease(service) }
+            guard let stats = IORegistryEntryCreateCFProperty(service, "PerformanceStatistics" as CFString,
+                      kCFAllocatorDefault, 0)?.takeRetainedValue() as? [String: Any] else { continue }
+            values.merge(stats)
         }
-        
-        let temp = getIOAcceleratorStat(key: "Temperature(C)")
-        let power = getIOAcceleratorStat(key: "Total Power(W)")
-        let util = getIOAcceleratorStat(key: "Device Utilization %")
-        let vram = getIOAcceleratorStat(key: "inUseVidMemoryBytes")
-        let fan = (temp > 0 && temp < 50.0) ? 0 : getIOAcceleratorStat(key: "Fan Speed(RPM)")
-        
-        cachedGPUStats = (temp, power, util, vram, fan, now)
+        cachedGPUStats = (values.temperature ?? 0, values.power ?? 0, values.utilization ?? 0,
+                          values.vram ?? 0, values.fan, now)
     }
-    
+
     func getGPUTemp() -> Float {
         updateGPUStatsCache()
         return cachedGPUStats.temp
@@ -962,11 +821,11 @@ actor ProcessorModel {
     /// Fetches all kext/mach telemetry in a single actor-isolated call,
     /// collapsing ~8 `await` crossings into one. Internally caches GPU stats
     /// via `updateGPUStatsCache()` (500 ms TTL).
-    func snapshotTelemetry(forceMetric: Bool) -> TelemetrySnapshot {
+    func snapshotTelemetry(forceMetric: Bool, sampleGPU: Bool) -> TelemetrySnapshot {
         let metric = getMetric(forced: forceMetric)
         let loadIdx = getLoadIndex()
         let cores = numberOfCores
-        updateGPUStatsCache()
+        if sampleGPU { updateGPUStatsCache() }
         return TelemetrySnapshot(
             metric: metric,
             loadIndex: loadIdx,

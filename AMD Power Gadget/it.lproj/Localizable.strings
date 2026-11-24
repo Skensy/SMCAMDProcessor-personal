@@ -639,3 +639,8 @@
 "Renoir power limits" = "Limiti di potenza Renoir";
 "Measured / limit" = "Misurata / limite";
 "Firmware metrics unavailable" = "Metriche del firmware non disponibili";
+
+"Automatic" = "Automatico";
+"Base" = "Base";
+"Low Power" = "Risparmio energetico";
+"Choose the CPU power mode or an available hardware P-state." = "Scegli la modalità di gestione della CPU o uno dei P-state disponibili.";

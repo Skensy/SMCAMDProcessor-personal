@@ -62,7 +62,7 @@ void i386_deactivate_cpu(void);
 //    int wrmsr_carefully(uint32_t msr, uint64_t val);
 
 
-void pmRyzen_wrmsr_safe(void *, uint32_t, uint64_t);
+bool pmRyzen_wrmsr_safe(void *, uint32_t, uint64_t);
 uint64_t pmRyzen_rdmsr_safe(void *, uint32_t);
 
 
@@ -192,7 +192,7 @@ public:
     void updateClockSpeed(uint8_t physical);
     void calculateEffectiveFrequency(uint8_t physical);
     void updateInstructionDelta(uint8_t physical);
-    void applyPowerControl();
+    IOReturn applyPowerControl(uint64_t state);
     void applyEPPControl();
     
     void setCPBState(bool enabled);
@@ -437,6 +437,8 @@ public:
     bool gpuSupportsPower(uint32_t index);
     
 private:
+    IOReturn applyPowerControlLocked(uint64_t state);
+    bool manualPStateRequested {false};
     IOWorkLoop *workLoop;
     IOTimerEventSource *timerEvent_main;
     IOTimerEventSource *timerEvent_tempe;

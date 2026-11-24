@@ -72,6 +72,62 @@ struct RankedPhysicalCore: Identifiable {
 }
 
 
+struct GPUStatistics {
+    private(set) var temperature: Float?
+    private(set) var power: Float?
+    private(set) var utilization: Float?
+    private(set) var vram: Float?
+    private var reportedFan: Float?
+
+    var fan: Float {
+        if let temperature, temperature > 0 && temperature < 50 { return 0 }
+        return reportedFan ?? 0
+    }
+
+    var complete: Bool {
+        temperature != nil && power != nil && utilization != nil && vram != nil &&
+            (reportedFan != nil || (temperature.map { $0 > 0 && $0 < 50 } ?? false))
+    }
+
+    mutating func merge(_ stats: [String: Any]) {
+        // Preserve the first report per key across accelerators, including zero.
+        temperature = temperature ?? (stats["Temperature(C)"] as? NSNumber)?.floatValue
+        power = power ?? (stats["Total Power(W)"] as? NSNumber)?.floatValue
+        utilization = utilization ?? (stats["Device Utilization %"] as? NSNumber)?.floatValue
+        vram = vram ?? (stats["inUseVidMemoryBytes"] as? NSNumber)?.floatValue
+        reportedFan = reportedFan ?? (stats["Fan Speed(RPM)"] as? NSNumber)?.floatValue
+    }
+}
+
+enum LegacySpeedStep: Hashable {
+    case automatic
+    case hardware(id: Int, mhz: Float)
+    case boost, base, lowPower
+
+    var label: String {
+        switch self {
+        case .automatic: return NSLocalizedString("Automatic", comment: "Legacy P-state governor")
+        case let .hardware(id, mhz): return String(format: "P%d\n%.2f GHz", id, mhz / 1000)
+        case .boost: return NSLocalizedString("Performance", comment: "Boost enabled")
+        case .base: return NSLocalizedString("Base", comment: "Boost disabled")
+        case .lowPower: return NSLocalizedString("Low Power", comment: "Low power governor")
+        }
+    }
+
+    static func choices(definitions: [UInt64], family: UInt64) -> [Self] {
+        let hardware = definitions.enumerated().compactMap { index, raw -> Self? in
+            let row = PStateRow.from(raw: raw, index: index, cpuFamily: family)
+            guard row.enabled != 0, row.computedSpeedMHz > 0 else { return nil }
+            return .hardware(id: index, mhz: row.computedSpeedMHz)
+        }
+        if hardware.isEmpty { return [] }
+        if hardware.count == 1, case .hardware(0, _) = hardware[0] {
+            return [.boost, .base, .lowPower]
+        }
+        return [.automatic] + hardware
+    }
+}
+
 struct PStateRow: Identifiable {
     let id: Int
     var enabled: UInt32
@@ -104,7 +160,7 @@ struct PStateRow: Identifiable {
             // Zen 5: CpuFid occupies bits 0-11 (12 bits), no CpuDfsId field
             r |= UInt64(cpuFid) & 0xfff
         } else {
-            r |= (UInt64(cpuDfsId) & 0x1f) << 8
+            r |= (UInt64(cpuDfsId) & 0x3f) << 8
             r |=  UInt64(cpuFid)   & 0xff
         }
         return r
@@ -123,7 +179,7 @@ struct PStateRow: Identifiable {
             iddDiv:   UInt32((raw >> 30) & 0x3),
             iddValue: UInt32((raw >> 22) & 0xff),
             cpuVid:   UInt32((raw >> 14) & 0xff),
-            cpuDfsId: zen5 ? 1 : UInt32((raw >> 8) & 0x1f),
+            cpuDfsId: zen5 ? 1 : UInt32((raw >> 8) & 0x3f),
             cpuFid:   zen5 ? UInt32(raw & 0xfff) : UInt32(raw & 0xff),
             isZen5:   zen5
         )

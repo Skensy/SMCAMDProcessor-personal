@@ -19,6 +19,10 @@ class DesktopWidgetManager: NSObject, ObservableObject, NSWindowDelegate {
         return !widgetWindows.isEmpty
     }
     
+    var showsGPUStats: Bool {
+        widgetWindows[.gpu] != nil || widgetWindows[.united] != nil
+    }
+
     func refreshWidgets() {
         for type in DesktopWidgetType.allCases {
             let key = "widget_enabled_\(type.rawValue)"

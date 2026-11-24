@@ -39,8 +39,6 @@ extern pmRyzen_idle_strategy_t pmRyzen_idle_strategy;
 
 #define EFF_INTERVAL 0.15
 #define PSTATE_LIMIT 1
-#define PSTATE_STEPDOWN_THRE 0.12
-#define PSTATE_STEPUP_THRE 0.38
 #define PSTATE_STEPDOWN_TIME 16
 #define PSTATE_STEPDOWN_MP_GAIN 5
 
@@ -61,10 +59,18 @@ extern uint64_t pmRyzen_exit_idle_false_c;
 #pragma mark - Idle Strategy
 extern uint32_t pmRyzen_hpcpus;
 
-extern volatile uint32_t pmRyzen_pstatelimit;
+extern uint32_t pmRyzen_pstatelimit;
+
+static inline uint32_t pmRyzen_get_limit(void) {
+    return __atomic_load_n(&pmRyzen_pstatelimit, __ATOMIC_RELAXED);
+}
+
+static inline void pmRyzen_set_limit(uint32_t limit) {
+    __atomic_store_n(&pmRyzen_pstatelimit, limit, __ATOMIC_RELAXED);
+}
 
 
-extern void pmRyzen_wrmsr_safe(void *, uint32_t, uint64_t);
+extern bool pmRyzen_wrmsr_safe(void *, uint32_t, uint64_t);
 extern uint64_t pmRyzen_rdmsr_safe(void *, uint32_t);
 extern pmRyzen_symtable_t pmRyzen_symtable;
 
@@ -96,6 +102,9 @@ typedef struct __attribute__((aligned(64))) pmProcessor {
 void pmRyzen_init(void*, int allowDispatch);
 void pmRyzen_stop(void);
 void pmRyzen_PState_reset(void);
+void pmRyzen_record_pstate(uint32_t cn, uint8_t state);
+void pmRyzen_update_pstate_mask(uint8_t mask);
+void pmRyzen_check_busy_cpu(uint32_t cn);
 float pmRyzen_avgload_pcpu(uint32_t);
 
 uint64_t pmRyzen_machine_idle(uint64_t);

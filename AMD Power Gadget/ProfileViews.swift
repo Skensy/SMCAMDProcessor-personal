@@ -11,19 +11,6 @@ import SwiftUI
 struct ProfilesContentView: View {
     @ObservedObject var model: TelemetryModel
     @State private var isCurveOptimizerUnlocked = false
-    private var stepLabels: [String] {
-        model.speedStepClocks.enumerated().map { i, freq in
-            let ghz = freq * 0.001
-            switch i {
-            case 0: return String(format: "Performance\n%.1f GHz", ghz)
-            case 1: return String(format: "Balanced\n%.1f GHz", ghz)
-            case 2: return String(format: "Base\n%.1f GHz", ghz)
-            case 3: return String(format: "Efficient\n%.1f GHz", ghz)
-            case 4: return String(format: "Low Power\n%.1f GHz", ghz)
-            default: return String(format: "P%d\n%.1f GHz", i, ghz)
-            }
-        }
-    }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -169,12 +156,14 @@ struct ProfilesContentView: View {
                     ) {
                         VStack(alignment: .leading, spacing: 4) {
                             SectionTitle("CPU Speed Profiles (Legacy)")
-                            Text("Select a manual P-State override profile. Frequencies will be restricted to the selected step.")
+                            Text("Choose the CPU power mode or an available hardware P-state.")
                                 .font(.system(size: 11)).foregroundColor(.tahoeSubtext)
                                 .padding(.bottom, 6)
                             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                                ForEach(Array(stepLabels.enumerated()), id: \.offset) { i, label in
-                                    SpeedStepCard(label: label, isActive: model.selectedSpeedStep == i) { Task { await model.setSpeedStep(i) } }
+                                ForEach(model.speedSteps, id: \.self) { step in
+                                    SpeedStepCard(label: step.label, isActive: model.selectedSpeedStep == step) {
+                                        Task { await model.setSpeedStep(step) }
+                                    }
                                 }
                             }
                         }
@@ -196,10 +185,10 @@ struct ProfilesContentView: View {
                         InfoRow(label: "EPP Profile", value: NSLocalizedString(eppLabels[activeIdx], comment: ""))
                         Divider().background(Color.tahoeCardBorder)
                         InfoRow(label: "Auto-EPP Engine", value: model.autoEPPEnabled ? "Active (Dynamic Load)" : "Disabled")
-                    } else if stepLabels.indices.contains(model.selectedSpeedStep) {
+                    } else if let step = model.selectedSpeedStep {
                         InfoRow(label: "Mode", value: "Legacy P-States")
                         Divider().background(Color.tahoeCardBorder)
-                        InfoRow(label: "Profile", value: stepLabels[model.selectedSpeedStep].replacingOccurrences(of: "\n", with: " — "))
+                        InfoRow(label: "Profile", value: step.label.replacingOccurrences(of: "\n", with: " — "))
                     }
                     Divider().background(Color.tahoeCardBorder)
                     InfoRow(label: "Avg Frequency", value: String(format: "%.3f GHz", model.cpuFreqAvgGHz))

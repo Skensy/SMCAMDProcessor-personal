@@ -40,6 +40,11 @@ jobs:
           cp -R Kexts/VirtualSMC.kext ./ 2>/dev/null || true
           [ -d MacKernelSDK/Headers ] || git clone --depth 1 https://github.com/acidanthera/MacKernelSDK.git
 
+      - name: Test legacy P-state policy
+        run: |
+          clang -std=c11 -Wall -Wextra -Werror -fsanitize=undefined Tests/PStatePolicyTests.c -o "$RUNNER_TEMP/pstate-policy-tests"
+          "$RUNNER_TEMP/pstate-policy-tests"
+
       # Important: only the first scheme uses `clean`. A later `clean` wipes prior
       # products from the shared DerivedData path and broke "Package CI artifact".
       - name: Build AMDRyzenCPUPowerManagement

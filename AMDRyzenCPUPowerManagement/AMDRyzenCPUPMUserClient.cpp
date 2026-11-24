@@ -374,13 +374,7 @@ IOReturn AMDRyzenCPUPMUserClient::externalMethod(uint32_t selector, IOExternalMe
             if(arguments->scalarInputCount != 1)
                 return kIOReturnBadArgument;
             
-            // controlLock protects PStateCtl + applyPowerControl as an atomic
-            // critical section against concurrent UserClient calls (audit K-2).
-            if (provider->controlLock) IOLockLock(provider->controlLock);
-            provider->PStateCtl = (uint8_t)arguments->scalarInput[0];
-            provider->applyPowerControl();
-            if (provider->controlLock) IOLockUnlock(provider->controlLock);
-            break;
+            return provider->applyPowerControl(arguments->scalarInput[0]);
         }
 
         // Zero-copy streaming structured telemetry packet (Task 1.2)

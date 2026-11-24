@@ -91,8 +91,8 @@ final class TelemetryModel: ObservableObject {
     private var cachedCSVColumnConfig: CSVColumnConfig? = nil
     private var csvConfigDirty: Bool = true
 
-    @Published var selectedSpeedStep: Int = 0
-    @Published var speedStepClocks: [Float] = []
+    @Published var selectedSpeedStep: LegacySpeedStep?
+    @Published var speedSteps: [LegacySpeedStep] = []
     @Published var curveOptimizerOffsets: [Int8] = []
     @Published var numPhysicalCores: Int = 0
 
@@ -420,14 +420,14 @@ final class TelemetryModel: ObservableObject {
         sample()
 
         // Async init: populate ProcessorModel actor state that needs await
-        // speedStepClocks, selectedSpeedStep, pStateRows, and sysInfo are deferred
+        // speedSteps, selectedSpeedStep, pStateRows, and sysInfo are deferred
         // because init() is synchronous but the actor methods require await.
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             await buildSystemInfo()
             updateRankedPhysicalCores()
-            speedStepClocks = await ProcessorModel.shared.getValidPStateClocks()
-            selectedSpeedStep = await ProcessorModel.shared.getPState()
+            speedSteps = await ProcessorModel.shared.speedSteps
+            selectedSpeedStep = await ProcessorModel.shared.getSpeedStep()
             await loadPStateRows()
         }
 
@@ -725,30 +725,31 @@ final class TelemetryModel: ObservableObject {
         let logging = isLoggingEnabled
         let mbc = menu
 
+        let gpuWidget = DesktopWidgetManager.shared.showsGPUStats
+        let skipGPU = lightMode && !gpuWidget && !logging && !mbc.showGPU && !mbc.showGPUvram && !mbc.showGPUfan
+        let gpuFanCurve = autoFanCurveEnabled && fanMappings.values.contains {
+            customCurves.indices.contains($0) && customCurves[$0].sourceSensor == .gpu
+        }
+        let skipGPUThermals = lightMode && !gpuWidget && !gpuFanCurve && !logging && !mbc.showGPUtemp && !mbc.showGPUpwr
+
+        let needGPUExtras = !skipGPU && (!lightMode || nowTime.timeIntervalSince(lastGPUExtraSample) >= 3)
         // Single actor-isolated kext snapshot instead of ~8 individual await calls.
         // snapshotTelemetry() returns metric, loadIndex, numPhysicalCores, and GPU stats
         // in one actor hop, cutting IPC overhead significantly.
-        let snap = await pm.snapshotTelemetry(forceMetric: true)
+        let snap = await pm.snapshotTelemetry(forceMetric: true, sampleGPU: !skipGPUThermals || needGPUExtras)
         let metric = snap.metric
         let loadIndex = snap.loadIndex
         let numPhys = snap.numPhysicalCores
 
         // GPU stats with TTL caching — use snapshot values when we need fresh data,
         // fall back to stale published properties when cache is warm.
-        let skipGPU = lightMode && !logging && !mbc.showGPU && !mbc.showGPUvram && !mbc.showGPUfan
-        let skipGPUThermals = lightMode && !logging && !mbc.showGPUtemp && !mbc.showGPUpwr
-
         let rawGPUTemp = skipGPUThermals ? Float(gpuTempC) : snap.gpuTemp
         let rawGPUPower = skipGPUThermals ? Float(gpuPowerW) : snap.gpuPower
         var newLastGPUExtraSample: Date? = nil
         let rawGPULoad: Float
         let rawGPUVram: Float
         let rawGPUFan: Float
-        if skipGPU {
-            rawGPULoad = Float(gpuLoadPct)
-            rawGPUVram = Float(gpuVramUsedBytes)
-            rawGPUFan = Float(gpuFanRPM)
-        } else if lightMode, nowTime.timeIntervalSince(lastGPUExtraSample) < 3.0 {
+        if !needGPUExtras {
             rawGPULoad = Float(gpuLoadPct)
             rawGPUVram = Float(gpuVramUsedBytes)
             rawGPUFan = Float(gpuFanRPM)
@@ -1347,8 +1348,8 @@ final class TelemetryModel: ObservableObject {
             loadCPUControls()
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                self.speedStepClocks  = await ProcessorModel.shared.getValidPStateClocks()
-                self.selectedSpeedStep = await ProcessorModel.shared.getPState()
+                self.speedSteps  = await ProcessorModel.shared.speedSteps
+                self.selectedSpeedStep = await ProcessorModel.shared.getSpeedStep()
             }
             lastCPUControlsCheck = now
         }
@@ -1673,10 +1674,11 @@ final class TelemetryModel: ObservableObject {
         }
     }
 
-    func setSpeedStep(_ index: Int) async {
-        let status = await ProcessorModel.shared.setPState(state: index)
+    func setSpeedStep(_ step: LegacySpeedStep) async {
+        let status = await ProcessorModel.shared.setSpeedStep(step)
         if noteKernelWriteStatus(status) {
-            selectedSpeedStep = index
+            selectedSpeedStep = step
+            loadCPUControls()
         } else {
             // Reload actual P-state selection so UI does not stick on a denied step
             loadCPUControls()
