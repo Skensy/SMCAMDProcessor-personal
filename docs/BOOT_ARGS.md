@@ -11,8 +11,7 @@ Ensure `boot-args` is also listed under **`NVRAM → Delete`** for the same GUID
 
 | Argument | Required? | Effect |
 |----------|-----------|--------|
-| **`-amdpnopchk`** | Optional (recommended for full GUI control without root) | Disables UserClient write privilege checks. Non-root apps (menu bar) can change fans, EPP, P-States, Curve Optimizer, SuperIO, etc. |
-| **`-amdcppcactive`** | Optional | Enables **CPPC Active Mode** at boot so EPP / autonomous scaling is available to the OS and the app. |
+| **`-amdpnopchk`** | Optional (recommended for full GUI control without root) | Disables UserClient write privilege checks. Non-root apps (menu bar) can change fans, P-States, Curve Optimizer, SuperIO, etc. |
 | **`-amdpdbg`** | Optional (debug only) | Enables verbose Lilu/plugin debug logging for this project. |
 
 Other boot-args you may already use (`agdpmod=pikera`, `alcid=…`, Lilu flags, etc.) are unrelated to this project and can coexist.
@@ -35,7 +34,7 @@ The menu bar app normally runs as your login user (not root). Without this flag,
 ### Example `boot-args` fragment
 
 ```text
-…existing args… -amdcppcactive -amdpnopchk
+…existing args… -amdpnopchk
 ```
 
 ### Security warning
@@ -48,14 +47,6 @@ The menu bar app normally runs as your login user (not root). Without this flag,
 
 1. Run AMD Power Gadget as root (not practical for a menu bar extra), or  
 2. Accept read-only monitoring and leave controls to BIOS.
-
----
-
-## `-amdcppcactive` — CPPC Active Mode at boot
-
-Enables Collaborative Processor Performance Control so the SMU/OS can honor EPP profiles (Performance / Balanced / Power Save) from the app.
-
-Without it, CPPC-related UI may report unsupported or inactive depending on firmware and CPU.
 
 ---
 
@@ -80,7 +71,7 @@ nvram boot-args
 In the app:
 
 1. Open **Profiles** or **Fan Control**.  
-2. Change EPP or a fan override.  
+2. Change a supported P-state or fan setting.
 3. You should **not** see the orange privilege banner if `-amdpnopchk` is active.
 
 ---

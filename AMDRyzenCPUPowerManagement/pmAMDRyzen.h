@@ -53,7 +53,6 @@ extern uint32_t pmRyzen_num_logi;
 
 extern uint64_t pmRyzen_exit_idle_c;
 extern uint64_t pmRyzen_exit_idle_ipi_c;
-extern uint64_t pmRyzen_exit_idle_false_c;
 
 
 #pragma mark - Idle Strategy
@@ -86,7 +85,7 @@ typedef struct __attribute__((aligned(64))) pmProcessor {
     uint64_t last_idle_tsc;
     uint64_t last_start_tsc;
     uint64_t last_idle_length;
-    uint64_t last_running_time;
+    uint64_t promotionDeadline; // mach absolute time, owned by this logical CPU
 
     // Cache Line 2 (64 bytes): Hot Load accumulators & P-state control
     uint64_t eff_timeacc;
@@ -99,9 +98,10 @@ typedef struct __attribute__((aligned(64))) pmProcessor {
     uint8_t _reserved[23]; // Align total structure size to exactly 128 bytes (2 cache lines)
 } pmProcessor_t;
 
-void pmRyzen_init(void*, int allowDispatch);
+void pmRyzen_init(void*, int allowDispatch, bool renoir);
 void pmRyzen_stop(void);
 void pmRyzen_PState_reset(void);
+void pmRyzen_reconcile_pstates(void);
 void pmRyzen_record_pstate(uint32_t cn, uint8_t state);
 void pmRyzen_update_pstate_mask(uint8_t mask);
 void pmRyzen_check_busy_cpu(uint32_t cn);

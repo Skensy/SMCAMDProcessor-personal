@@ -62,7 +62,7 @@ Cuando falla una escritura privilegiada, AMD Power Gadget:
 ## Configuración recomendada (Hackintosh personal)
 
 ```text
-boot-args: ... -amdcppcactive -amdpnopchk
+boot-args: ... -amdpnopchk
 ```
 
 - Telemetría con el usuario normal.

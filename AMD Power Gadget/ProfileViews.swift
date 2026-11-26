@@ -18,8 +18,8 @@ struct ProfilesContentView: View {
                 
                 // 1. CPPC Mode Switch
                 UnsupportedFeatureOverlay(
-                    isSupported: model.cppcSupported,
-                    reasonText: LocalizedStringKey("CPPC: Disabled by CPU architecture")
+                    isSupported: model.eppControlAvailable,
+                    reasonText: LocalizedStringKey("EPP control unavailable in this driver")
                 ) {
                     TahoeCard(accent: Color.tahoeAccentCyan.opacity(0.15)) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -37,22 +37,14 @@ struct ProfilesContentView: View {
                                 ))
                                 .toggleStyle(SwitchToggleStyle(tint: .tahoeAccentCyan))
                                 .labelsHidden()
-                                .disabled(!model.smcDriverLoaded)
+                                .disabled(!model.smcDriverLoaded || !model.eppControlAvailable)
                             }
                             if !model.smcDriverLoaded {
                                 Text(NSLocalizedString("AMDRyzenCPUPowerManagement kext not connected.", comment: ""))
                                     .font(.system(size: 10)).foregroundColor(.tahoeAccentOrange)
-                            } else if !model.cppcSupported && !model.cppcActiveMode {
-                                Text(NSLocalizedString("This CPU did not report CPPC support to the kext.", comment: ""))
-                                    .font(.system(size: 10)).foregroundColor(.tahoeAccentOrange)
-                            } else if !model.cppcActiveMode {
-                                Text(NSLocalizedString(
-                                    "If the switch snaps back to Off: enable writes with boot-arg -amdpnopchk (or run as root). With -amdcppcactive the kext enables Active Mode at boot after reboot.",
-                                    comment: "CPPC Active Mode help"
-                                ))
-                                .font(.system(size: 10))
-                                .foregroundColor(.tahoeSubtext)
-                                .fixedSize(horizontal: false, vertical: true)
+                            } else if !model.eppControlAvailable {
+                                Text("EPP control unavailable in this driver")
+                                    .font(.system(size: 10)).foregroundColor(.tahoeSubtext)
                             }
                             if let err = model.privilegeErrorMessage {
                                 Text(err)

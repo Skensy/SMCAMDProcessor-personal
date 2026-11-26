@@ -83,9 +83,8 @@ See [PRIVILEGE_AND_SECURITY.md](PRIVILEGE_AND_SECURITY.md) and [BOOT_ARGS.md](BO
 
 ## CPPC / EPP / power
 
-- Profiles: Performance / Balanced / Power Save (EPP hints).  
-- Auto-EPP by load and optional AC/battery switching.  
-- Boot flag **`-amdcppcactive`** recommended for Active Mode at boot.
+- Renoir offers balanced and Low Power governor modes with optional AC/battery switching.
+- The driver exposes read-only CPPC rankings where the hardware provides them.
 
 ---
 

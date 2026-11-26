@@ -10,7 +10,7 @@ Start here, then open the topic you need.
 | Document | EN | ES | Description |
 |----------|----|----|-------------|
 | Installation | [INSTALLATION.md](INSTALLATION.md) | [INSTALLATION_ES.md](INSTALLATION_ES.md) | OpenCore kexts, app install, verify, build, uninstall |
-| Boot arguments | [BOOT_ARGS.md](BOOT_ARGS.md) | [BOOT_ARGS_ES.md](BOOT_ARGS_ES.md) | `-amdpnopchk`, `-amdcppcactive`, `-amdpdbg` |
+| Boot arguments | [BOOT_ARGS.md](BOOT_ARGS.md) | [BOOT_ARGS_ES.md](BOOT_ARGS_ES.md) | `-amdpnopchk`, `-amdpdbg` |
 | Privilege & security | [PRIVILEGE_AND_SECURITY.md](PRIVILEGE_AND_SECURITY.md) | [PRIVILEGE_AND_SECURITY_ES.md](PRIVILEGE_AND_SECURITY_ES.md) | UserClient model, selector matrix, app banner |
 | Features | [FEATURES.md](FEATURES.md) | [FEATURES_ES.md](FEATURES_ES.md) | Tabs, language, fans, CO, CPPC, safety |
 | Troubleshooting | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | [TROUBLESHOOTING_ES.md](TROUBLESHOOTING_ES.md) | Kext not found, privilege banner, fans, i18n |
@@ -42,7 +42,7 @@ Start here, then open the topic you need.
 ## Recommended reading order (new users)
 
 1. **[INSTALLATION](INSTALLATION.md)** (or ES) — get kexts + app running  
-2. **[BOOT_ARGS](BOOT_ARGS.md)** — add `-amdcppcactive -amdpnopchk` if you want full GUI control  
+2. **[BOOT_ARGS](BOOT_ARGS.md)** — add `-amdpnopchk` if you want full GUI control
 3. **[FEATURES](FEATURES.md)** / user manual — learn each tab  
 4. **[TROUBLESHOOTING](TROUBLESHOOTING.md)** — if something fails  
 
@@ -57,7 +57,7 @@ OpenCore kext order:
   Lilu → VirtualSMC → AMDRyzenCPUPowerManagement → SMCAMDProcessor
 
 Recommended boot-args (personal machine):
-  … -amdcppcactive -amdpnopchk
+  … -amdpnopchk
 
 Language:
   Themes & Appearance → Language → Apply & Restart

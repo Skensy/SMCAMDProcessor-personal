@@ -32,8 +32,7 @@ En **NVRAM → Add → `7C436110-AB2A-4BBB-A880-FE41995C9F82` → boot-args**. I
 
 | Argumento | Función |
 |-----------|---------|
-| **`-amdpnopchk`** | Desactiva chequeos de **escritura** del UserClient. La app en barra de menús (sin root) puede cambiar ventiladores, EPP, P-States, Curve Optimizer, SuperIO. **Recomendado en PCs personales de confianza** para control total. |
-| **`-amdcppcactive`** | Activa CPPC Active Mode al arrancar (perfiles EPP). |
+| **`-amdpnopchk`** | Desactiva chequeos de **escritura** del UserClient. La app en barra de menús (sin root) puede cambiar ventiladores, P-States, Curve Optimizer, SuperIO. **Recomendado en PCs personales de confianza** para control total. |
 | **`-amdpdbg`** | Logs de depuración del kext (solo diagnóstico). |
 
 **Modelo de privilegios (v3.16.1+):**
@@ -78,9 +77,8 @@ Frecuencia, temperatura, potencia y red, con promedio / máx / mín. Intervalo d
 
 ## 4. Pestaña Perfiles
 
-### 4.1 Perfiles EPP
-- **Ahorro de energía**, **Equilibrado**, **Rendimiento**.
-- Preferible **`-amdcppcactive`** al arrancar. Auto-EPP por carga / AC-batería cuando esté disponible.
+### 4.1 Renoir
+En modo automático, **Use Low Power on battery** selecciona el perfil de bajo consumo al usar la batería y el perfil normal al conectar la alimentación. La app debe estar en ejecución. CPPC ofrece telemetría de solo lectura en las CPU compatibles.
 
 ### 4.2 P-States legacy
 - Bloqueo a un P-State.

@@ -49,7 +49,7 @@ Release binaries (when packaged) live under `Binaries_Release/vX.Y.Z/`. Local de
 Under **NVRAM → Add → `7C436110-AB2A-4BBB-A880-FE41995C9F82` → `boot-args`**, append:
 
 ```text
--amdcppcactive -amdpnopchk
+-amdpnopchk
 ```
 
 Also list `boot-args` under **NVRAM → Delete** for the same GUID so OpenCore refreshes NVRAM each boot.

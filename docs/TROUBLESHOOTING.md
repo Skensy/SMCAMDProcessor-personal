@@ -12,7 +12,7 @@ Version reference: **3.16.x**
 | App opens but **all controls fail** + orange banner | Non-root + no `-amdpnopchk` | Add boot-arg or accept read-only mode — [BOOT_ARGS.md](BOOT_ARGS.md) |
 | Telemetry OK, fans don’t change | Same privilege model | As above |
 | Fans stuck / wrong RPM | SuperIO family/regs | Check chip family; NCT/ITE support list in [FEATURES.md](FEATURES.md) |
-| CPPC / EPP inactive | Missing `-amdcppcactive` or firmware | Add boot-arg; reboot |
+| CPPC / EPP inactive | EPP writes are unavailable in this driver | Use the legacy governor on supported processors. |
 | Black screen (Navi GPU) | Unrelated OC arg | `agdpmod=pikera` (GPU, not this project) |
 | Language doesn’t change | Did not restart | **Apply & Restart** after language pick |
 | Modal “kext load” spam | Fixed in 3.16.2 | Update kext/app so `kunc_alert` fires once |

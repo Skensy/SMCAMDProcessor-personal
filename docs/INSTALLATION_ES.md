@@ -49,7 +49,7 @@ Binarios de release: `Binaries_Release/vX.Y.Z/`. Builds locales: Xcode / `build_
 En **NVRAM → Add → `7C436110-AB2A-4BBB-A880-FE41995C9F82` → `boot-args`**, añade:
 
 ```text
--amdcppcactive -amdpnopchk
+-amdpnopchk
 ```
 
 Incluye también `boot-args` en **NVRAM → Delete** del mismo GUID.

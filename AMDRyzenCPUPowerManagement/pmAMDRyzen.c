@@ -9,6 +9,8 @@
 #include "PStatePolicy.h"
 
 #include <pexpert/pexpert.h>
+#include <kern/clock.h>
+#include <mach/mach_time.h>
 
 
 
@@ -24,9 +26,16 @@ uint32_t pmRyzen_num_phys;
 uint32_t pmRyzen_num_logi;
 pmRyzen_idle_strategy_t pmRyzen_idle_strategy = PMRYZEN_IDLE_STRATEGY_SIMPLE;
 
-uint64_t pmRyzen_exit_idle_false_c;
-
 static uint8_t pmRyzen_enabled_pstates;
+static bool renoirPolicy;
+static uint64_t promotionDelay[2];
+
+static void arm_promotion(pmProcessor_t *cpu) {
+    unsigned limit = pmRyzen_get_limit();
+    cpu->promotionDeadline = 0;
+    if (renoirPolicy && limit && cpu->cpu_awake && cpu->PState > 0 && cpu->PState < 8)
+        cpu->promotionDeadline = mach_absolute_time() + promotionDelay[limit == 2];
+}
 
 void pmRyzen_update_pstate_mask(uint8_t mask) {
     __atomic_store_n(&pmRyzen_enabled_pstates, mask, __ATOMIC_RELAXED);
@@ -105,6 +114,7 @@ void pmRyzen_init_PState(void){
 // Called locally with interrupts disabled; account only successful MSR transitions.
 void pmRyzen_record_pstate(uint32_t cn, uint8_t state) {
     pmProcessor_t *cpu = &pmRyzen_cpus[cn];
+    if (state == 0) cpu->promotionDeadline = 0;
     if (cpu->PState == state) return;
     if (state == 0) __atomic_fetch_add(&pmRyzen_hpcpus, 1, __ATOMIC_RELAXED);
     else if (cpu->PState == 0) __atomic_fetch_sub(&pmRyzen_hpcpus, 1, __ATOMIC_RELAXED);
@@ -119,23 +129,53 @@ static void set_PState(uint32_t cn, uint8_t state, bool force) {
         pmRyzen_record_pstate(cn, state);
 }
 
-static void pmRyzen_doPState_reset(void *arg) {
+// XNU asks for the local PM deadline on clock interrupts and timer updates.
+// Publish only elapsed deadlines so short bursts never schedule a wake from idle.
+static uint64_t renoir_get_deadline(x86_lcpu_t *lcpu) {
+    unsigned cn = lcpu->cpu_num;
+    if (cn >= XNU_MAX_CPU || !pmRyzen_get_limit()) return 0;
+    uint64_t deadline = pmRyzen_cpus[cn].promotionDeadline;
+    return deadline ? pmRyzen_due_deadline(deadline, mach_absolute_time()) : 0;
+}
+
+static void renoir_handle_deadline(x86_lcpu_t *lcpu) {
+    unsigned cn = lcpu->cpu_num;
+    if (cn >= XNU_MAX_CPU) return;
+    pmProcessor_t *cpu = &pmRyzen_cpus[cn];
+    cpu->promotionDeadline = 0;
+    if (cpu->cpu_awake && pmRyzen_get_limit()) {
+        set_PState(cn, 0, false);
+        cpu->ll_count = 0;
+        arm_promotion(cpu); // Retry a failed MSR write after another full interval.
+    }
+}
+
+static void pmRyzen_doPState_reset(void *preserveAllowed) {
     uint32_t cn = cpu_number();
     if (cn >= XNU_MAX_CPU) return;
     pmProcessor_t *cpu = &pmRyzen_cpus[cn];
     cpu->ll_count = 0;
     cpu->eff_timeacc = cpu->eff_idleacc = 0;
     cpu->last_start_tsc = cpu->cpu_awake ? rdtsc64() : 0;
-    set_PState(cn, 0, true);
+    uint8_t mask = __atomic_load_n(&pmRyzen_enabled_pstates, __ATOMIC_RELAXED);
+    uint8_t state = preserveAllowed && renoirPolicy
+        ? pmRyzen_reconciled_state(mask, cpu->PState, pmRyzen_get_limit()) : 0;
+    set_PState(cn, state, !preserveAllowed);
+    arm_promotion(cpu);
 }
 
 void pmRyzen_PState_reset(void) {
     mp_rendezvous_no_intrs(&pmRyzen_doPState_reset, NULL);
 }
 
+void pmRyzen_reconcile_pstates(void) {
+    bool preserve = true;
+    mp_rendezvous_no_intrs(&pmRyzen_doPState_reset, &preserve);
+}
+
 #pragma mark - Init / Stop
 
-void pmRyzen_init(void *handle, int allowDispatch){
+void pmRyzen_init(void *handle, int allowDispatch, bool renoir){
     
     pmRyzen_io_service_handle = handle;
     IOLog("AMDRyzenCPUPowerManagement::pmRyzen_init sizeof(pmProcessor_t) = %lu bytes (cacheline aligned)\n", (unsigned long)sizeof(pmProcessor_t));
@@ -159,6 +199,13 @@ void pmRyzen_init(void *handle, int allowDispatch){
     
     
     
+    renoirPolicy = renoir && allowDispatch;
+    if (renoirPolicy) {
+        clock_interval_to_absolutetime_interval(25, NSEC_PER_MSEC, &promotionDelay[0]);
+        clock_interval_to_absolutetime_interval(50, NSEC_PER_MSEC, &promotionDelay[1]);
+        pmRyzen_cpuFuncs.GetDeadline = renoir_get_deadline;
+        pmRyzen_cpuFuncs.Deadline = renoir_handle_deadline;
+    }
     pmCallBacks_t cb;
     if (allowDispatch) {
         if(*kernelDisp)(*pmRyzen_pmUnRegister)(*kernelDisp);
@@ -292,6 +339,7 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
     pmProcessor_t *self = &pmRyzen_cpus[cn];
     
     
+    self->promotionDeadline = 0;
     self->cpu_awake = 0;
     self->arm_flag = 0;
     
@@ -307,8 +355,6 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
 
     
     self->cpu_awake = 1;
-    if(!self->arm_flag)
-        pmRyzen_exit_idle_false_c++;
     
     
     tscnow = rdtsc64();
@@ -316,6 +362,7 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
     if (tscnow < self->last_idle_tsc) {
         self->eff_timeacc = self->eff_idleacc = 0;
         self->last_start_tsc = tscnow;
+        arm_promotion(self);
         return 0;
     }
     uint64_t tscela = tscnow - self->last_idle_tsc;
@@ -326,15 +373,20 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
 
     if(self->eff_timeacc > pmRyzen_effective_timetsc){
         int direction = pmRyzen_load_direction(self->eff_timeacc, self->eff_idleacc);
+        unsigned limit = pmRyzen_get_limit();
         if (direction > 0) {
             set_PState(cn, 0, false);
             self->ll_count = 0;
-        } else if (direction < 0 && pmRyzen_get_limit()) {
-            if (++self->ll_count > PSTATE_STEPDOWN_TIME + __atomic_load_n(&pmRyzen_hpcpus, __ATOMIC_RELAXED) * PSTATE_STEPDOWN_MP_GAIN) {
+        } else if (direction < 0 && limit) {
+            unsigned windows = renoirPolicy ? pmRyzen_down_windows(limit) :
+                1 + PSTATE_STEPDOWN_TIME + __atomic_load_n(&pmRyzen_hpcpus, __ATOMIC_RELAXED) * PSTATE_STEPDOWN_MP_GAIN;
+            if (++self->ll_count >= windows) {
                 self->ll_count = 0;
                 uint8_t mask = __atomic_load_n(&pmRyzen_enabled_pstates, __ATOMIC_RELAXED);
-                set_PState(cn, pmRyzen_next_lower(mask, self->PState, pmRyzen_get_limit()), false);
+                set_PState(cn, pmRyzen_next_lower(mask, self->PState, limit), false);
             }
+        } else if (renoirPolicy) {
+            self->ll_count = 0;
         }
 
         self->eff_idleaccd = self->eff_idleacc;
@@ -346,6 +398,7 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
 
     self->last_start_tsc = tscnow;
     self->last_idle_length = tscela;
+    if (renoirPolicy) arm_promotion(self);
     
     pmRyzen_last_woken_cpu = cn;
     return 0;

@@ -79,10 +79,10 @@ struct PopoverProfilesView: View {
                 }
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(model.autoEPPEnabled ? LocalizedStringKey("Energy Profile (Auto-EPP Active)") : LocalizedStringKey("Energy Profile"))
+                    Text(model.eppControlAvailable && model.autoEPPEnabled ? LocalizedStringKey("Energy Profile (Auto-EPP Active)") : LocalizedStringKey("Energy Profile"))
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(model.autoEPPEnabled ? theme.accentCyan : theme.subtext)
-                    Text(currentProfileName)
+                    Text(model.eppControlAvailable ? currentProfileName : NSLocalizedString("EPP control unavailable in this driver", comment: ""))
                         .font(.system(size: 14, weight: .bold))
                         .foregroundColor(theme.text)
                 }
@@ -94,7 +94,7 @@ struct PopoverProfilesView: View {
             VStack(spacing: 8) {
                 Slider(value: sliderValue, in: 0...3, step: 1)
                     .accentColor(currentProfileColor)
-                    .disabled(model.autoEPPEnabled)
+                    .disabled(!model.eppControlAvailable || model.autoEPPEnabled)
                 
                 HStack {
                     Text(LocalizedStringKey("Power Save"))
@@ -143,7 +143,9 @@ struct PopoverProfilesView: View {
                 }
                 .toggleStyle(SwitchToggleStyle(tint: theme.accentCyan))
                 
-                Toggle(isOn: $model.cpbEnabled) {
+                .disabled(!model.eppControlAvailable)
+
+                Toggle(isOn: Binding(get: { model.cpbEnabled }, set: { model.setCPB(enabled: $0) })) {
                     HStack {
                         Image(systemName: "flame.fill")
                             .foregroundColor(theme.accentOrange)
@@ -154,9 +156,7 @@ struct PopoverProfilesView: View {
                     }
                 }
                 .toggleStyle(SwitchToggleStyle(tint: theme.accentOrange))
-                .onChange(of: model.cpbEnabled) { newValue in
-                    model.setCPB(enabled: newValue)
-                }
+                .disabled(!model.cpbSupported)
             }
         }
         .padding(16)

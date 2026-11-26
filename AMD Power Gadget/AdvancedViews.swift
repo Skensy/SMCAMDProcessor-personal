@@ -51,7 +51,7 @@ struct AdvancedContentView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Low Power Mode (LPM)").font(.system(size: 12, weight: .semibold)).foregroundColor(.tahoeText)
-                            Text("Forces CPU to lowest frequency for minimum power").font(.system(size: 10)).foregroundColor(.tahoeSubtext)
+                            Text("Allows lower P-states and a quicker downshift on Renoir").font(.system(size: 10)).foregroundColor(.tahoeSubtext)
                         }
                         Spacer()
                         Toggle("", isOn: Binding(get: { model.lpmEnabled }, set: { model.setLPM(enabled: $0) }))
@@ -60,6 +60,10 @@ struct AdvancedContentView: View {
                 }
 
                 Divider().background(Color.tahoeCardBorder)
+                if model.renoirGovernorAvailable {
+                    Toggle("Use Low Power on battery", isOn: $model.automaticRenoirLowPower)
+                        .help("Switch the automatic governor when the power source changes.")
+                }
                 SectionTitle("Refresh Rate")
                 Text("Adjust how frequently telemetry data updates. Lower = more responsive, higher = less CPU usage.")
                     .font(.system(size: 11)).foregroundColor(.tahoeSubtext)

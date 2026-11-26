@@ -644,3 +644,9 @@
 "Base" = "Base";
 "Low Power" = "Risparmio energetico";
 "Choose the CPU power mode or an available hardware P-state." = "Scegli la modalità di gestione della CPU o uno dei P-state disponibili.";
+
+"EPP control unavailable in this driver" = "Controllo EPP non disponibile con questo driver";
+"Use Low Power on battery" = "Usa Risparmio energia quando sei a batteria";
+"Switch the automatic governor when the power source changes." = "Adatta il governor automatico quando colleghi o scolleghi l’alimentatore.";
+"Allows lower P-states and a quicker downshift on Renoir" = "Consente P-state inferiori e una discesa più rapida su Renoir";
+"CPU control failed (0x%08X)." = "Modifica del controllo CPU non riuscita (0x%08X).";

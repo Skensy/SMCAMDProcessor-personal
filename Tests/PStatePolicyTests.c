@@ -21,6 +21,17 @@ int main(void) {
     assert(!pmRyzen_busy_for_window(999, 1000, 150));
     assert(!pmRyzen_busy_for_window(1149, 1000, 150));
     assert(pmRyzen_busy_for_window(1150, 1000, 150));
+    assert(pmRyzen_due_deadline(0, 200) == 0);
+    assert(pmRyzen_due_deadline(100, 99) == 0);
+    assert(pmRyzen_due_deadline(100, 100) == 100);
+    assert(pmRyzen_due_deadline(100, 102) == 100);
+    assert(pmRyzen_down_windows(2) == 2);
+    assert(pmRyzen_down_windows(1) == 6);
+    assert(pmRyzen_reconciled_state(0x05, 2, 1) == 2);
+    assert(pmRyzen_reconciled_state(0x05, 2, 2) == 2);
+    assert(pmRyzen_reconciled_state(0x07, 2, 1) == 1);
+    assert(pmRyzen_reconciled_state(0x05, 1, 1) == 0);
+    assert(pmRyzen_reconciled_state(0x05, 8, 1) == 0);
     assert(pmRyzen_next_lower(0x05, 0, 1) == 2);
     assert(pmRyzen_next_lower(0x05, 2, 2) == 2);
     assert(pmRyzen_next_lower(0x07, 1, 1) == 1);

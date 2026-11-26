@@ -32,8 +32,7 @@ Add under OpenCore **NVRAM → Add → `7C436110-AB2A-4BBB-A880-FE41995C9F82` �
 
 | Argument | Purpose |
 |----------|---------|
-| **`-amdpnopchk`** | Disables UserClient **write** privilege checks. Menu bar app (non-root) can change fans, EPP, P-States, Curve Optimizer, SuperIO. **Recommended on trusted personal machines** for full GUI control. |
-| **`-amdcppcactive`** | Enables CPPC Active Mode at boot so EPP profiles work with the SMU/OS. |
+| **`-amdpnopchk`** | Disables UserClient **write** privilege checks. Menu bar app (non-root) can change fans, P-States, Curve Optimizer, SuperIO. **Recommended on trusted personal machines** for full GUI control. |
 | **`-amdpdbg`** | Verbose kext debug logging (troubleshooting only). |
 
 **Privilege model (v3.16.1+):**
@@ -83,13 +82,8 @@ Frequency, temperature, power, and network charts with average / max / min metad
 
 ## 4. Profiles Tab (CPU Speed Management)
 
-### 4.1 EPP Profiles (Hardware Autonomous)
-Energy Performance Preference via CPPC. Hint the SMU; hardware scales on load.
-- **Power Saver** — lower boost priority / acoustics / battery.
-- **Balanced** — default.
-- **Performance** — higher responsiveness / single-thread boost priority.
-
-Requires CPPC path; prefer **`-amdcppcactive`** at boot. Optional auto-EPP by load and AC/battery switching when available.
+### 4.1 Renoir
+In automatic mode, **Use Low Power on battery** selects Low Power when unplugged and balanced mode on AC. The app must be running. CPPC provides read-only telemetry on supported CPUs.
 
 ### 4.2 CPU Speed Profiles (Legacy / Manual P-State)
 - **Manual P-State Override**: Lock to a step (e.g. P0 max, P2 base). No dynamic scaling.

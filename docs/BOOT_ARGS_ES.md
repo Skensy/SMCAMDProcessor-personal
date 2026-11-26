@@ -11,8 +11,7 @@ Incluye también `boot-args` en **`NVRAM → Delete`** del mismo GUID para que O
 
 | Argumento | ¿Obligatorio? | Efecto |
 |-----------|---------------|--------|
-| **`-amdpnopchk`** | Opcional (recomendado para control total de la app sin root) | Desactiva el chequeo de privilegios de escritura del UserClient. La app en la barra de menús puede cambiar ventiladores, EPP, P-States, Curve Optimizer, SuperIO, etc. |
-| **`-amdcppcactive`** | Opcional | Activa **CPPC Active Mode** al arrancar (EPP / escalado autónomo). |
+| **`-amdpnopchk`** | Opcional (recomendado para control total de la app sin root) | Desactiva el chequeo de privilegios de escritura del UserClient. La app en la barra de menús puede cambiar ventiladores, P-States, Curve Optimizer, SuperIO, etc. |
 | **`-amdpdbg`** | Opcional (solo depuración) | Logs de depuración verbosos del proyecto. |
 
 Otros boot-args (`agdpmod=pikera`, `alcid=…`, Lilu, etc.) pueden convivir sin problema.
@@ -35,7 +34,7 @@ La app suele correr como tu usuario (no root). Sin este flag, **monitorizas bien
 ### Ejemplo
 
 ```text
-…tus args… -amdcppcactive -amdpnopchk
+…tus args… -amdpnopchk
 ```
 
 ### Aviso de seguridad
@@ -53,7 +52,7 @@ kextstat | grep -i AMDRyzen
 nvram boot-args
 ```
 
-En la app, cambiar EPP o un ventilador **no** debería mostrar el banner de privilegios si el flag está activo.
+En la app, cambiar un P-State compatible o un ventilador **no** debería mostrar el banner de privilegios si el flag está activo.
 
 ---
 

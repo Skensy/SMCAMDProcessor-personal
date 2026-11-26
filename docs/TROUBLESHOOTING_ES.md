@@ -12,7 +12,7 @@ Versión de referencia: **3.16.x**
 | Controles fallan + **banner naranja** | Usuario normal sin `-amdpnopchk` | Añadir boot-arg o modo solo lectura — [BOOT_ARGS_ES.md](BOOT_ARGS_ES.md) |
 | Telemetría OK, ventiladores no cambian | Mismo modelo de privilegios | Igual |
 | RPM incorrectas / fantasma | SuperIO | Ocultar fan; kext actualizado |
-| EPP / CPPC inactivo | Falta `-amdcppcactive` | Añadir y reiniciar |
+| EPP / CPPC inactivo | El controlador ofrece telemetría CPPC de solo lectura | Usa el gobernador legacy en los procesadores compatibles. |
 | Idioma no cambia | No se reinició la app | **Aplicar y reiniciar** |
 | Spam de alertas del kext | Corregido en 3.16.2 | Actualizar |
 

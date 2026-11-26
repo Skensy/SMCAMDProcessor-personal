@@ -153,7 +153,6 @@ public:
     static constexpr uint32_t kMSR_PSTATE_STAT = 0xC0010063;
     static constexpr uint32_t kMSR_PSTATE_CTL = 0xC0010062;
     static constexpr uint32_t kMSR_RAPL_PWR_UNIT = 0xC0010299;
-    static constexpr uint32_t kMSR_PKG_C6_RES = 0xC0010296;
     static constexpr uint32_t kMSR_MPERF = 0x000000E7;
     static constexpr uint32_t kMSR_APERF = 0x000000E8;
     static constexpr uint32_t kMSR_PERF_CTL_0 = 0xC0010000;
@@ -193,10 +192,9 @@ public:
     void calculateEffectiveFrequency(uint8_t physical);
     void updateInstructionDelta(uint8_t physical);
     IOReturn applyPowerControl(uint64_t state);
-    void applyEPPControl();
     
-    void setCPBState(bool enabled);
-    bool getCPBState();
+    IOReturn setCPBState(bool enabled);
+    bool getCPBState(bool &enabled);
     
 #define HF_TEMP_SAMPLE_SECS 3
 #define HF_TEMP_SAMPLE_FREQ 2
@@ -221,7 +219,7 @@ public:
     void evaluateFanCurves();
     
     uint32_t getPMPStateLimit();
-    void setPMPStateLimit(uint32_t);
+    IOReturn setPMPStateLimit(uint32_t, bool automaticOnly = false);
     
     uint32_t getHPcpus();
     int setCurveOptimizer(uint8_t core, int8_t offset);
@@ -230,12 +228,8 @@ public:
     uint32_t totalNumberOfLogicalCores;
     
     bool cppcSupported {false};
-    bool cppcActiveMode {false};
-    uint8_t cppcEPPValue {0x3F};
     uint8_t cppcHighestPerf_perCore[CPUInfo::MaxCpus] {};
-    bool cppcThrottled {false};
     uint64_t cstateAddrConfig {0};
-    uint64_t packageC6Residency {0};
     
     uint8_t cpuFamily;
     uint8_t cpuModel;
@@ -289,7 +283,7 @@ public:
     
     
     uint64_t lastUpdateTime;
-    uint64_t lastUpdateEnergyValue;
+    uint32_t lastUpdateEnergyValue {0};
     
     double uniPackagePowerW;   // Average package power in watts (energy delta / time delta)
     
@@ -386,7 +380,6 @@ public:
     };
 
     // Feature matrix - controlled per-profile
-    bool cppcReadInInit {false};       // Read CPPC CAP1 during workloop init
     bool legacyPstateAllowed {false};  // Legacy P-state writes
     bool pmDispatchAllowed {false};    // Custom PM dispatch takeover
     bool temperatureOffset49 {false};  // Apply 49C temperature offset (per profile)

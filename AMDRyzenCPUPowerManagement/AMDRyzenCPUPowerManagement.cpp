@@ -20,8 +20,6 @@ static constexpr const struct tctl_offset tctl_offset_table[] = {
 
 static constexpr float  kTHERMAL_GUARD_TEMP_C        = 85.0f;
 static constexpr uint8_t kTHERMAL_GUARD_PWM          = 200;   // 80%
-static constexpr float  kTHERMAL_THROTTLE_TEMP_C     = 95.0f; // CPPC throttle
-static constexpr float  kTHERMAL_THROTTLE_CLEAR_C    = 85.0f;
 static constexpr float  kCURVE_OPTIMIZER_BLOCK_TEMP_C = 75.0f;
 
 bool ADDPR(debugEnabled) = false;
@@ -230,14 +228,6 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
             mp_rendezvous_no_intrs([](void *obj) {
                 auto provider = static_cast<AMDRyzenCPUPowerManagement*>(obj);
                 
-                // NOTE: Writing kMSR_CSTATE_ADDR (0xC0010073) with 0xF0 disables
-                // deep C-states (C6+). This prevents macOS from parking cores in
-                // low-power idle, which reduces wake latency for telemetry but
-                // increases idle power consumption. This is intentional for the
-                // monitoring use-case — if power efficiency is critical, consider
-                // making this configurable via a boot-arg.
-                provider->write_msr(kMSR_CSTATE_ADDR, 0xf0);
-                
                 uint64_t hwConfig;
                 if(!provider->read_msr(kMSR_HWCR, &hwConfig)) {
                     IOLog("AMDRyzenCPUPowerManagement::startWorkLoop: failed to read kMSR_HWCR, skipping init.\n");
@@ -261,11 +251,7 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
                     bool msrSuccess = provider->read_msr(kMSR_AMD_CPPC_CAP1, &cppcCap);
                     IOLog("AMDRyzenCPUPowerManagement::startWorkLoop Core %d CPPC CAP1 read: %d, value: 0x%llX\n", cpu_num, msrSuccess, cppcCap);
                     if (msrSuccess) {
-                        // AMD PPR states bits 7:0 are HighestPerformance
-                        provider->cppcHighestPerf_perCore[cpu_num] = cppcCap & 0xFF;
-                        
-                        // For Vermeer baseline: do NOT enable CPPC by default
-                        // Keep cppcActiveMode=false to avoid writing CPPC_ENABLE/REQ
+                        provider->cppcHighestPerf_perCore[cpu_num] = (cppcCap >> 24) & 0xff;
                     }
                 }
 
@@ -286,12 +272,8 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
 
             }, provider);
             
-            uint64_t cstateAddr = 0;
-            if (provider->read_msr(kMSR_CSTATE_ADDR, &cstateAddr)) {
-                provider->cstateAddrConfig = cstateAddr;
-                IOLog("AMDRyzenCPUPowerManagement::startWorkLoop: C-State address configuration: 0x%llX\n", cstateAddr);
-            }
-            
+            provider->updatePackageEnergy(); // Establish the boot energy/time baseline.
+
             //Make all cores P0 state by default.
             provider->PStateCtl = 0;
             
@@ -312,6 +294,9 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
             provider->removeProperty("RenoirPowerMetrics");
             IOLockLock(provider->rendezvousLock);
             provider->reinitHwState();
+            provider->pwrLastTSC = 0;
+            provider->uniPackagePowerW = 0;
+            provider->updatePackageEnergy();
             if (provider->manualPStateRequested &&
                 provider->applyPowerControlLocked(provider->PStateCtl) != kIOReturnSuccess) {
                 IOLog("AMDRyzenCPUPowerManagement: manual P-state unavailable on wake, resuming automatic control\n");
@@ -348,9 +333,6 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
         provider->updatePackageTemp();
         provider->updatePackageEnergy();
         
-        // Read Package C6 Residency MSR (cumulative microseconds)
-        provider->read_msr(kMSR_PKG_C6_RES, &provider->packageC6Residency);
-
         IOLockUnlock(provider->rendezvousLock);
 
         provider->updateRenoirPowerMetrics();
@@ -411,7 +393,6 @@ void AMDRyzenCPUPowerManagement::initWorkLoop() {
     registerService();
     
     lastUpdateTime = getCurrentTimeNs();
-    pwrLastTSC = rdtsc64();
     workLoop->addEventSource(timerEvent_main);
     workLoop->addEventSource(timerEvent_tempe);
     timerEvent_main->setTimeoutMS(1);
@@ -435,7 +416,6 @@ void AMDRyzenCPUPowerManagement::resumeWorkLoop() {
     pendingReinit = true;
     workLoop->enableAllEventSources();
     serviceInitialized = true;
-    pwrLastTSC = rdtsc64();
     // Give the system 250ms to complete the wake sequence before the kext
     // starts its own rendezvous / MSR work. 1ms was causing a CPU stall spike.
     if (timerEvent_main) timerEvent_main->setTimeoutMS(250);
@@ -522,7 +502,6 @@ bool AMDRyzenCPUPowerManagement::start(IOService *provider){
         }
         
         if (activeProfile) {
-            cppcReadInInit = activeProfile->supportsCPPC;
             legacyPstateAllowed = activeProfile->legacyPstateAllowed;
             pmDispatchAllowed = activeProfile->pmDispatchAllowed;
             temperatureOffset49 = activeProfile->temperatureOffset49;
@@ -682,7 +661,7 @@ bool AMDRyzenCPUPowerManagement::start(IOService *provider){
         xnuTSCFreq = 1000000000u; // Fallback default 1GHz calibration
     }
 
-    pmRyzen_init(this, pmDispatchAllowed ? 1 : 0);
+    pmRyzen_init(this, pmDispatchAllowed, cpuFamily == 0x17 && cpuModel == 0x60);
 
     // Populate per-family SMU mailbox descriptor.
     // Sources: Linux drivers/platform/x86/amd-pmf/, AGESA SMU headers, amdgpu nv.c.
@@ -1124,50 +1103,65 @@ IOReturn AMDRyzenCPUPowerManagement::applyPowerControlLocked(uint64_t state) {
     return req.failed ? kIOReturnIOError : kIOReturnSuccess;
 }
 
-void AMDRyzenCPUPowerManagement::applyEPPControl() {
-    // CPPC writes (ENABLE/REQ MSRs) are disabled in the current baseline.
-    // This function is a no-op until validated CPPC write support is added
-    // via a per-profile capability flag.
-    IOLog("AMDRyzenCPUPowerManagement::applyEPPControl ignored - CPPC writes disabled in baseline\n");
-    return;
-}
+IOReturn AMDRyzenCPUPowerManagement::setCPBState(bool enabled) {
+    if (!cpbSupported) return kIOReturnUnsupported;
+    if (totalNumberOfLogicalCores > CPUInfo::MaxCpus) return kIOReturnUnsupported;
 
-void AMDRyzenCPUPowerManagement::setCPBState(bool enabled){
-    if(!cpbSupported) return;
-    
-    uint64_t hwConfig;
-    if(!read_msr(kMSR_HWCR, &hwConfig)) {
-        IOLog("AMDRyzenCPUPowerManagement::setCPBState failed to read MSR 0xC0010015\n");
-        return;
-    }
-    
-    if(enabled){
-        hwConfig &= ~(1 << 25);
-    } else {
-        hwConfig |= (1 << 25);
-    }
-    
-    struct CPBArgs {
+    struct BoostRequest {
         AMDRyzenCPUPowerManagement *provider;
-        uint64_t hwConfig;
-    } cpbArgs{this, hwConfig};
+        bool enable;
+        bool rollback;
+        bool changed[CPUInfo::MaxCpus];
+        unsigned failed;
+    } request {this, enabled, false, {}, 0};
+
+    auto update = [](void *context) {
+        auto *r = static_cast<BoostRequest *>(context);
+        unsigned cpu = cpu_number();
+        if (cpu >= CPUInfo::MaxCpus) {
+            __atomic_store_n(&r->failed, 1U, __ATOMIC_RELAXED);
+            return;
+        }
+        if (r->rollback && !r->changed[cpu]) return;
+        constexpr uint64_t disableBoost = 1ULL << 25;
+        bool enable = r->rollback ? !r->enable : r->enable;
+        uint64_t current = 0;
+        if (r->provider->read_msr(kMSR_HWCR, &current)) {
+            uint64_t desired = enable ? current & ~disableBoost : current | disableBoost;
+            if (desired == current) return;
+            if (r->provider->write_msr(kMSR_HWCR, desired)) {
+                r->changed[cpu] = true;
+                uint64_t observed = 0;
+                if (r->provider->read_msr(kMSR_HWCR, &observed) &&
+                    (observed & disableBoost) == (desired & disableBoost)) return;
+            }
+        }
+        __atomic_store_n(&r->failed, 1U, __ATOMIC_RELAXED);
+    };
 
     IOLockLock(rendezvousLock);
-    mp_rendezvous(nullptr, [](void *obj) {
-        auto args = static_cast<CPBArgs*>(obj);
-        args->provider->write_msr(kMSR_HWCR, args->hwConfig);
-    }, nullptr, &cpbArgs);
+    if (!serviceInitialized) {
+        IOLockUnlock(rendezvousLock);
+        return kIOReturnNotReady;
+    }
+    mp_rendezvous_no_intrs(update, &request);
+    IOReturn result = kIOReturnSuccess;
+    if (request.failed) {
+        result = kIOReturnIOError;
+        request.rollback = true;
+        request.failed = 0;
+        mp_rendezvous_no_intrs(update, &request);
+        if (request.failed) IOLog("AMDRyzenCPUPowerManagement: incomplete boost rollback\n");
+    }
     IOLockUnlock(rendezvousLock);
+    return result;
 }
 
-bool AMDRyzenCPUPowerManagement::getCPBState(){
-    uint64_t hwConfig;
-    if(!read_msr(kMSR_HWCR, &hwConfig)) {
-        IOLog("AMDRyzenCPUPowerManagement::getCPBState failed to read MSR 0xC0010015\n");
-        return false;
-    }
-    
-    return !((hwConfig >> 25) & 0x1);
+bool AMDRyzenCPUPowerManagement::getCPBState(bool &enabled) {
+    uint64_t hwConfig = 0;
+    if (!read_msr(kMSR_HWCR, &hwConfig)) return false;
+    enabled = !(hwConfig & (1ULL << 25));
+    return true;
 }
 
 inline float AMDRyzenCPUPowerManagement::getPackageTemp() {
@@ -1439,46 +1433,24 @@ void AMDRyzenCPUPowerManagement::updatePackageTemp(){
     PACKAGE_TEMPERATURE_perPackage[0] = currentTemp;
     __sync_synchronize();
     
-    // Dynamic CPPC Throttling Logic
-    if (cppcActiveMode) {
-        if (!cppcThrottled && currentTemp > kTHERMAL_THROTTLE_TEMP_C) {
-            cppcThrottled = true;
-            IOLog("AMDRyzenCPUPowerManagement: Thermal limit reached (%.1f°C). Throttling CPPC EPP to Power Save.\n", currentTemp);
-            applyEPPControl();
-        } else if (cppcThrottled && currentTemp < kTHERMAL_THROTTLE_CLEAR_C) {
-            cppcThrottled = false;
-            IOLog("AMDRyzenCPUPowerManagement: Thermal condition cleared (%.1f°C). Restoring CPPC EPP.\n", currentTemp);
-            applyEPPControl();
-        }
-    }
 }
 
-void AMDRyzenCPUPowerManagement::updatePackageEnergy(){
-    
-    uint64_t ctsc = rdtsc64();
-
-    uint64_t msr_value_buf = 0;
-    if (!read_msr(kMSR_PKG_ENERGY_STAT, &msr_value_buf)) {
-        IOLog("AMDRyzenCPUPowerManagement::updatePackageEnergy: failed to read MSR 0xC001029B\n");
+void AMDRyzenCPUPowerManagement::updatePackageEnergy() {
+    uint64_t raw = 0;
+    if (!read_msr(kMSR_PKG_ENERGY_STAT, &raw)) return;
+    uint64_t now = rdtsc64();
+    uint64_t previousTSC = pwrLastTSC;
+    uint32_t energy = static_cast<uint32_t>(raw);
+    uint32_t delta = energy - lastUpdateEnergyValue;
+    pwrLastTSC = now;
+    lastUpdateEnergyValue = energy;
+    if (!previousTSC || now <= previousTSC || delta > 0x80000000U) {
+        uniPackagePowerW = 0;
         return;
     }
-
-    uint32_t energyValue = (uint32_t)(msr_value_buf & 0xffffffff);
-
-    uint32_t energyDelta = energyValue - (uint32_t)lastUpdateEnergyValue;
-
-    // Guard against anomalous wrap-around producing absurd delta values
-    if (energyDelta > 0x80000000u) { lastUpdateEnergyValue = energyValue; return; }
-
-    double seconds = (ctsc - pwrLastTSC) / (double)(xnuTSCFreq);
-    if (seconds <= 0.0) { pwrLastTSC = ctsc; return; }
-    double e = (pwrEnergyUnit * (double)energyDelta) / seconds;
-    uniPackagePowerW = e;
+    double seconds = (now - previousTSC) / static_cast<double>(xnuTSCFreq);
+    uniPackagePowerW = pwrEnergyUnit * delta / seconds;
     __sync_synchronize();
-
-
-    lastUpdateEnergyValue = energyValue;
-    pwrLastTSC = ctsc;  // Use the timestamp captured at the start of this function to avoid drift
 }
 
 void AMDRyzenCPUPowerManagement::dumpPstate(){
@@ -1554,32 +1526,14 @@ void AMDRyzenCPUPowerManagement::reinitHwState() {
     CPUInfo::getCpuid(0x80000007, 0, &cpuid_eax, &cpuid_ebx, &cpuid_ecx, &cpuid_edx);
     cpbSupported = (cpuid_edx >> 9) & 0x1;
 
-    // Probe CPPC support: read CAP1 MSR. All Zen families (17h/19h/1Ah) support CPPC,
-    // but CPPC writes (ENABLE/REQ MSRs) are disabled in the current baseline.
-    // CPPC writes may be enabled in a future profile update once validated.
-    uint64_t cppcVal = 0;
-    bool msrSuccess = read_msr(kMSR_AMD_CPPC_CAP1, &cppcVal);
-    const bool zenFamily = (cpuFamily == 0x17 || cpuFamily == 0x19 || cpuFamily == 0x1A);
+    // CAP1 is read-only telemetry. An architectural profile alone does not
+    // establish that firmware exposes usable CPPC rankings through MSRs.
+    uint64_t cap = 0;
+    cppcSupported = read_msr(kMSR_AMD_CPPC_CAP1, &cap) && ((cap >> 24) & 0xff);
+    uint64_t cstateAddress = 0;
+    read_msr(kMSR_CSTATE_ADDR, &cstateAddress);
+    cstateAddrConfig = cstateAddress;
 
-    // CPPC is supported if MSR reads successfully or CPU is a known Zen family.
-    if (msrSuccess || zenFamily) {
-        if (!cppcSupported) {
-            cppcSupported = true;
-        }
-        IOLog("AMDRyzenCPUPowerManagement::reinitHwState: CPPC CAP1 readable (CAP1=0x%llx)\n", cppcVal);
-    } else {
-        cppcSupported = false;
-    }
-
-    // CPPC write paths (ENABLE/REQ) are disabled in the current baseline.
-    // cppcActiveMode requires a future profile flag and boot-arg to enable.
-    cppcActiveMode = checkKernelArgument("-amdcppcactive");
-    // CPPC writes blocked until per-profile cppcWriteAllowed flag is implemented.
-    if (cppcActiveMode) {
-        cppcActiveMode = false;
-        IOLog("AMDRyzenCPUPowerManagement::reinitHwState: CPPC Active Mode blocked — writes disabled in baseline\n");
-    }
-    
     uint64_t rapl = 0;
     if (read_msr(kMSR_RAPL_PWR_UNIT, &rapl)) {
         uint8_t energyStatusUnits = (rapl >> 8) & 0x1f;
@@ -1689,17 +1643,28 @@ uint32_t AMDRyzenCPUPowerManagement::getPMPStateLimit(){
     return pmRyzen_get_limit();
 }
 
-void AMDRyzenCPUPowerManagement::setPMPStateLimit(uint32_t state){
-    if (!pmDispatchAllowed) return;
+IOReturn AMDRyzenCPUPowerManagement::setPMPStateLimit(uint32_t state, bool automaticOnly) {
+    if (!pmDispatchAllowed) return kIOReturnUnsupported;
+    if (state > 2) return kIOReturnBadArgument;
     IOLockLock(rendezvousLock);
-    uint32_t safeState = min(2U, state);
-    pmRyzen_set_limit(safeState);
-    if(safeState > 0){
-        manualPStateRequested = false;
-        pmRyzen_PState_reset();
-        PStateCtl = 0;
+    if (!serviceInitialized) {
+        IOLockUnlock(rendezvousLock);
+        return kIOReturnNotReady;
+    }
+    if (automaticOnly && !pmRyzen_get_limit()) {
+        IOLockUnlock(rendezvousLock);
+        return kIOReturnNotPermitted; // A manual selection wins over source notifications.
+    }
+    if (state != pmRyzen_get_limit()) {
+        pmRyzen_set_limit(state);
+        if (state) {
+            manualPStateRequested = false;
+            pmRyzen_reconcile_pstates();
+            PStateCtl = 0;
+        }
     }
     IOLockUnlock(rendezvousLock);
+    return kIOReturnSuccess;
 }
 
 uint32_t AMDRyzenCPUPowerManagement::getHPcpus(){

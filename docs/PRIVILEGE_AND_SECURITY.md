@@ -62,7 +62,7 @@ Message (EN):
 ## Recommended production setup (personal Hackintosh)
 
 ```text
-boot-args: ... -amdcppcactive -amdpnopchk
+boot-args: ... -amdpnopchk
 ```
 
 - Telemetry works for the normal user.  

@@ -422,7 +422,9 @@ IOReturn AMDRyzenCPUPMUserClient::externalMethod(uint32_t selector, IOExternalMe
                 dataOut[0] = (uint64_t)provider->cpbSupported;
             }
             if (maxLen >= 2 * sizeof(uint64_t)) {
-                dataOut[1] = (uint64_t)provider->getCPBState();
+                bool enabled = false;
+                if (provider->cpbSupported && !provider->getCPBState(enabled)) return kIOReturnIOError;
+                dataOut[1] = enabled;
             }
             break;
         }
@@ -439,9 +441,7 @@ IOReturn AMDRyzenCPUPMUserClient::externalMethod(uint32_t selector, IOExternalMe
             if(!provider->cpbSupported)
                 return kIOReturnNoDevice;
             
-            provider->setCPBState(arguments->scalarInput[0]==1?true:false);
-            
-            break;
+            return provider->setCPBState(arguments->scalarInput[0] == 1);
         }
             
         //Get PPM
@@ -475,9 +475,7 @@ IOReturn AMDRyzenCPUPMUserClient::externalMethod(uint32_t selector, IOExternalMe
                 
             boolean_t enabled = arguments->scalarInput[0]==1?true:false;
             
-            provider->setPMPStateLimit(enabled ? 1 : 0);
-            
-            break;
+            return provider->setPMPStateLimit(enabled ? 1 : 0);
         }
             
         //Set PStateDef
@@ -577,9 +575,7 @@ IOReturn AMDRyzenCPUPMUserClient::externalMethod(uint32_t selector, IOExternalMe
                 
             boolean_t enabled = arguments->scalarInput[0]==1?true:false;
             
-            provider->setPMPStateLimit(enabled ? 2 : 1);
-            
-            break;
+            return provider->setPMPStateLimit(enabled ? 2 : 1);
         }
             
         //Get CCD temperatures
@@ -643,52 +639,17 @@ IOReturn AMDRyzenCPUPMUserClient::externalMethod(uint32_t selector, IOExternalMe
         // Get CPPC Active Mode status and current EPP value
         case 23: {
             arguments->scalarOutputCount = 2;
-            arguments->scalarOutput[0] = provider->cppcActiveMode ? 1 : 0;
-            arguments->scalarOutput[1] = provider->cppcEPPValue;
-            
+            arguments->scalarOutput[0] = 0;
+            arguments->scalarOutput[1] = 0x3f; // Legacy ABI default for inactive mode.
             break;
         }
-        
-        // Set CPPC Active Mode status
-        case 24: {
-            if (!hasPrivilege(24))
-                return kIOReturnNotPrivileged;
-                
-            if (arguments->scalarInputCount != 1)
-                return kIOReturnBadArgument;
-                
-            // controlLock protects cppcActiveMode + applyEPPControl as an atomic
-            // critical section against concurrent UserClient calls (audit K-2).
-            if (provider->controlLock) IOLockLock(provider->controlLock);
-            provider->cppcActiveMode = (arguments->scalarInput[0] == 1);
-            if (provider->cppcActiveMode) {
-                provider->applyEPPControl();
-            }
-            if (provider->controlLock) IOLockUnlock(provider->controlLock);
-            
-            break;
-        }
-        
-        // Set CPPC EPP Value
-        case 25: {
-            if (!hasPrivilege(25))
-                return kIOReturnNotPrivileged;
-                
-            if (arguments->scalarInputCount != 1)
-                return kIOReturnBadArgument;
-                
-            // controlLock protects cppcEPPValue + applyEPPControl as an atomic
-            // critical section against concurrent UserClient calls (audit K-2).
-            if (provider->controlLock) IOLockLock(provider->controlLock);
-            provider->cppcEPPValue = (uint8_t)arguments->scalarInput[0];
-            if (provider->cppcActiveMode) {
-                provider->applyEPPControl();
-            }
-            if (provider->controlLock) IOLockUnlock(provider->controlLock);
-            
-            break;
-        }
-        
+
+        case 24: // Set CPPC active mode
+        case 25: // Set EPP
+            if (!hasPrivilege(selector)) return kIOReturnNotPrivileged;
+            if (arguments->scalarInputCount != 1) return kIOReturnBadArgument;
+            return kIOReturnUnsupported;
+
         // Get CPU profile info: architecture name + capability flags.
         // Structure output: cpuArchName (16 bytes) packed as chars,
         // followed by capability flags as uint64.
@@ -696,7 +657,8 @@ IOReturn AMDRyzenCPUPMUserClient::externalMethod(uint32_t selector, IOExternalMe
         //   bit 0: pmDispatchAllowed
         //   bit 1: legacyPstateAllowed
         //   bit 2: supportsCPPC
-        //   bits 3-7: reserved
+        //   bit 3: EPP writes supported (clear for current profiles)
+        //   bit 4: Renoir balanced / Low Power governor
         case 26: {
             arguments->scalarOutputCount = 0;
             
@@ -725,6 +687,8 @@ IOReturn AMDRyzenCPUPMUserClient::externalMethod(uint32_t selector, IOExternalMe
                 if (provider->pmDispatchAllowed)    flags |= (1ULL << 0);
                 if (provider->legacyPstateAllowed)  flags |= (1ULL << 1);
                 if (provider->supportsCPPC)         flags |= (1ULL << 2);
+                if (provider->pmDispatchAllowed && provider->cpuFamily == 0x17 && provider->cpuModel == 0x60)
+                    flags |= (1ULL << 4);
                 memcpy(dataOut + nameSize, &flags, flagsSize);
             }
             
@@ -782,25 +746,19 @@ IOReturn AMDRyzenCPUPMUserClient::externalMethod(uint32_t selector, IOExternalMe
             break;
         }
         
-        // Get Package C6 Residency (cumulative microseconds)
-        case 31: {
+        case 32: // Apply the Renoir AC/battery policy only in automatic mode.
+            if (!hasPrivilege(selector)) return kIOReturnNotPrivileged;
+            if (arguments->scalarInputCount != 1 || arguments->scalarInput[0] > 1) return kIOReturnBadArgument;
+            if (provider->cpuFamily != 0x17 || provider->cpuModel != 0x60) return kIOReturnUnsupported;
             arguments->scalarOutputCount = 0;
-            
-            uint32_t requiredSize = sizeof(uint64_t);
-            uint32_t maxLen = arguments->structureOutputSize;
-            arguments->structureOutputSize = requiredSize;
-            
-            if (!arguments->structureOutput) {
-                return kIOReturnBadArgument;
-            }
-            
-            uint64_t *dataOut = (uint64_t*) arguments->structureOutput;
-            if (maxLen >= sizeof(uint64_t)) {
-                dataOut[0] = provider->packageC6Residency;
-            }
-            break;
-        }
-        
+            arguments->structureOutputSize = 0;
+            return provider->setPMPStateLimit(arguments->scalarInput[0] ? 2 : 1, true);
+
+        case 31: // Package C6 residency has no validated counter on these profiles.
+            arguments->scalarOutputCount = 0;
+            arguments->structureOutputSize = 0;
+            return kIOReturnUnsupported;
+
         // Get GPU capabilities bitmask per GPU
         // Structure output: array of uint64, one per GPU
         // Bit 0: supports power reading

@@ -84,9 +84,8 @@ Ver [PRIVILEGE_AND_SECURITY_ES.md](PRIVILEGE_AND_SECURITY_ES.md) y [BOOT_ARGS_ES
 
 ## CPPC / EPP / energía
 
-- Perfiles: Rendimiento / Equilibrado / Ahorro.
-- Auto-EPP por carga y opcional AC/batería.
-- Boot-arg **`-amdcppcactive`** recomendado.
+- Renoir dispone de perfiles automático y de bajo consumo, con conmutación opcional al cambiar de fuente de alimentación.
+- El controlador proporciona telemetría CPPC de solo lectura en las CPU compatibles.
 
 ---
 

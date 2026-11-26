@@ -106,6 +106,16 @@ final class TelemetryModel: ObservableObject {
     @Published var cppcScoresEstimated: Bool = false
     @Published var rankedPhysicalCores: [RankedPhysicalCore] = []
     @Published var cstateAddress: UInt64 = 0
+    private(set) var eppControlAvailable = false
+    private(set) var renoirGovernorAvailable = false
+    private var powerSourceEvents: CFRunLoopSource?
+    private var appliedRenoirSource: Bool?
+    @Published var automaticRenoirLowPower = false {
+        didSet {
+            UserDefaults.standard.set(automaticRenoirLowPower, forKey: "automaticRenoirLowPower")
+            configureRenoirPowerNotifications()
+        }
+    }
     @Published var cppcActiveMode: Bool = false
     @Published var cppcEPPValue: UInt8 = 0x3F
     
@@ -408,8 +418,14 @@ final class TelemetryModel: ObservableObject {
             self.hiddenFanIDs = Set(ids)
         }
 
+        let profileWords = ProcessorModel.shared.kernelGetUInt64(count: 3, selector: 26)
+        let flags = profileWords.count == 3 ? profileWords[2] : 0
+        eppControlAvailable = (flags & (1 << 3)) != 0
+        renoirGovernorAvailable = (flags & (1 << 4)) != 0
+        automaticRenoirLowPower = UserDefaults.standard.bool(forKey: "automaticRenoirLowPower")
         initSMC()
         applySavedCPUControls()
+        configureRenoirPowerNotifications()
         loadCPUControls()  // All ProcessorModel calls here are nonisolated now
         
         let initialDisk = getDiskIOBytes()
@@ -1459,11 +1475,11 @@ final class TelemetryModel: ObservableObject {
 
     func applySavedCPUControls() {
         // Restore persisted controls; surface first privilege denial via banner.
-        if UserDefaults.standard.bool(forKey: "has_saved_cppcActiveMode") {
+        if eppControlAvailable && UserDefaults.standard.bool(forKey: "has_saved_cppcActiveMode") {
             let active = UserDefaults.standard.bool(forKey: "saved_cppcActiveMode")
             _ = noteKernelWriteStatus(ProcessorModel.shared.setCPPCActiveMode(active: active))
         }
-        if UserDefaults.standard.bool(forKey: "has_saved_cppcEPPValue") {
+        if eppControlAvailable && UserDefaults.standard.bool(forKey: "has_saved_cppcEPPValue") {
             let epp = UInt8(UserDefaults.standard.integer(forKey: "saved_cppcEPPValue"))
             _ = noteKernelWriteStatus(ProcessorModel.shared.setCPPCEPPValue(epp: epp))
         }
@@ -1471,13 +1487,13 @@ final class TelemetryModel: ObservableObject {
             let enabled = UserDefaults.standard.bool(forKey: "saved_cpbEnabled")
             _ = noteKernelWriteStatus(ProcessorModel.shared.setCPB(enabled: enabled))
         }
-        if UserDefaults.standard.bool(forKey: "has_saved_ppmEnabled") {
-            let enabled = UserDefaults.standard.bool(forKey: "saved_ppmEnabled")
-            _ = noteKernelWriteStatus(ProcessorModel.shared.setPPM(enabled: enabled))
-        }
-        if UserDefaults.standard.bool(forKey: "has_saved_lpmEnabled") {
-            let enabled = UserDefaults.standard.bool(forKey: "saved_lpmEnabled")
-            _ = noteKernelWriteStatus(ProcessorModel.shared.setLPM(enabled: enabled))
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: "has_saved_ppmEnabled") && !defaults.bool(forKey: "saved_ppmEnabled") {
+            _ = noteKernelWriteStatus(ProcessorModel.shared.setPPM(enabled: false))
+        } else if defaults.bool(forKey: "has_saved_lpmEnabled") {
+            _ = noteKernelWriteStatus(ProcessorModel.shared.setLPM(enabled: defaults.bool(forKey: "saved_lpmEnabled")))
+        } else if defaults.bool(forKey: "has_saved_ppmEnabled") {
+            _ = noteKernelWriteStatus(ProcessorModel.shared.setPPM(enabled: true))
         }
     }
 
@@ -1490,7 +1506,7 @@ final class TelemetryModel: ObservableObject {
 
         let cppcRes = ProcessorModel.shared.getCPPCScore()
         let cppc = ProcessorModel.shared.getCPPCActiveMode()
-        cppcActiveMode = cppc.active
+        cppcActiveMode = eppControlAvailable && cppc.active
         cppcEPPValue = cppc.epp
         // Refresh support for Profiles banner; Active Mode bit also implies CPPC path is live.
         cppcSupported = cppcRes.supported || cppc.active
@@ -1523,10 +1539,9 @@ final class TelemetryModel: ObservableObject {
             }
             return true
         }
-        if let hint = ProcessorModel.privilegeHint(for: status) {
-            privilegeErrorMessage = hint
-            schedulePrivilegeErrorDismiss()
-        }
+        privilegeErrorMessage = ProcessorModel.privilegeHint(for: status)
+            ?? String(format: NSLocalizedString("CPU control failed (0x%08X).", comment: ""), UInt32(bitPattern: status))
+        schedulePrivilegeErrorDismiss()
         return false
     }
 
@@ -1565,8 +1580,11 @@ final class TelemetryModel: ObservableObject {
     func setPPM(enabled: Bool) {
         let status = ProcessorModel.shared.setPPM(enabled: enabled)
         if noteKernelWriteStatus(status) {
+            if enabled { UserDefaults.standard.set(false, forKey: "saved_lpmEnabled") }
+            appliedRenoirSource = nil
             UserDefaults.standard.set(enabled, forKey: "saved_ppmEnabled")
             UserDefaults.standard.set(true, forKey: "has_saved_ppmEnabled")
+            applyRenoirPowerSource()
         }
         loadCPUControls()
     }
@@ -1574,6 +1592,8 @@ final class TelemetryModel: ObservableObject {
     func setLPM(enabled: Bool) {
         let status = ProcessorModel.shared.setLPM(enabled: enabled)
         if noteKernelWriteStatus(status) {
+            UserDefaults.standard.set(true, forKey: "saved_ppmEnabled")
+            UserDefaults.standard.set(true, forKey: "has_saved_ppmEnabled")
             UserDefaults.standard.set(enabled, forKey: "saved_lpmEnabled")
             UserDefaults.standard.set(true, forKey: "has_saved_lpmEnabled")
         }
@@ -1581,6 +1601,7 @@ final class TelemetryModel: ObservableObject {
     }
 
     func setCPPCActiveMode(active: Bool) {
+        guard eppControlAvailable else { return }
         let status = ProcessorModel.shared.setCPPCActiveMode(active: active)
         if noteKernelWriteStatus(status) {
             UserDefaults.standard.set(active, forKey: "saved_cppcActiveMode")
@@ -1590,6 +1611,7 @@ final class TelemetryModel: ObservableObject {
     }
 
     func setCPPCEPPValue(epp: UInt8) {
+        guard eppControlAvailable else { return }
         let status = ProcessorModel.shared.setCPPCEPPValue(epp: epp)
         if noteKernelWriteStatus(status) {
             UserDefaults.standard.set(Int(epp), forKey: "saved_cppcEPPValue")
@@ -1615,6 +1637,41 @@ final class TelemetryModel: ObservableObject {
                 cppcEPPValue = targetEPP
             }
         }
+    }
+
+    deinit {
+        if let events = powerSourceEvents { CFRunLoopSourceInvalidate(events) }
+    }
+
+    private func configureRenoirPowerNotifications() {
+        if let events = powerSourceEvents { CFRunLoopSourceInvalidate(events) }
+        powerSourceEvents = nil
+        appliedRenoirSource = nil
+        guard renoirGovernorAvailable, automaticRenoirLowPower else { return }
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        if let events = IOPSNotificationCreateRunLoopSource({ context in
+            guard let context else { return }
+            let model = Unmanaged<TelemetryModel>.fromOpaque(context).takeUnretainedValue()
+            Task { @MainActor [weak model] in model?.applyRenoirPowerSource() }
+        }, context)?.takeRetainedValue() {
+            powerSourceEvents = events
+            CFRunLoopAddSource(CFRunLoopGetMain(), events, .commonModes)
+        }
+        applyRenoirPowerSource()
+    }
+
+    private func applyRenoirPowerSource() {
+        guard automaticRenoirLowPower, renoirGovernorAvailable,
+              let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let source = IOPSGetProvidingPowerSourceType(snapshot)?.takeUnretainedValue() else { return }
+        let battery = CFEqual(source, kIOPSBatteryPowerValue as CFString)
+        guard battery || CFEqual(source, kIOPSACPowerValue as CFString),
+              appliedRenoirSource != battery, ProcessorModel.shared.getPPM() else { return }
+        let status = ProcessorModel.shared.kernelSetUInt64Status(selector: 32, args: [battery ? 1 : 0])
+        if status == kIOReturnNotPermitted { return }
+        guard noteKernelWriteStatus(status) else { return }
+        appliedRenoirSource = battery
+        loadCPUControls()
     }
 
     func isCurrentlyOnACPower() -> Bool {
@@ -1678,6 +1735,8 @@ final class TelemetryModel: ObservableObject {
         let status = await ProcessorModel.shared.setSpeedStep(step)
         if noteKernelWriteStatus(status) {
             selectedSpeedStep = step
+            appliedRenoirSource = nil
+            if step == .automatic { applyRenoirPowerSource() }
             loadCPUControls()
         } else {
             // Reload actual P-state selection so UI does not stick on a denied step

@@ -47,13 +47,13 @@ SMCAMDProcessor and AMD Power Gadget (Tahoe Edition) represent a complete archit
 - Diff-Based Rendering Engine: Smart threshold tracking skips redundant menu bar extra redraws (`setNeedsDisplay`) when sensor metrics fluctuate within idle tolerances.
 - In-Process Zero-Allocation Network Analytics: Direct CChar ASCII buffer parsing using `sysctl(NET_RT_IFLIST2)` eliminates heap allocations, backed by an adaptive low-frequency background sampling mode.
 - macOS 26 Tahoe UI Aesthetics: Designed with native Liquid Glass material vibrancy (`NSVisualEffectView`) and dynamic hierarchical SF Symbols 7+ fill glyphs (`cpu.fill`, `fan.fill`, `memorycard.fill`).
-- Hardware-Autonomous CPPC & EPP Control: Native opt-in (`-amdcppcactive`) for CPPC Active Mode, delegating microsecond clock scaling to the internal System Management Unit (SMU) with configurable EPP profiles (Performance, Balanced, Power Save).
+- Renoir power management: the automatic governor offers balanced and Low Power modes. **Advanced → Use Low Power on battery** follows power-source changes while AMD Power Gadget is running. Fixed manual P-states take precedence.
 - In-App Language Picker: **Themes & Appearance → Language** forces any bundled locale (`en`, `es`, `de`, `it`, …) or System Default; applied at launch via `AppleLanguages` with Apply & Restart.
 - Privilege UX Banner: When a write is denied (`kIOReturnNotPrivileged`), the dashboard shows a clear orange banner instead of silent failure (root or `-amdpnopchk` required for controls).
 
 ### 5. UserClient privilege model (v3.16.1+ / current: 3.16.2)
 - **Reads** (telemetry, fan RPM, temps): any process may open the UserClient — the menu bar app works without root.
-- **Writes** (fans, EPP, P-States, Curve Optimizer, SuperIO, …): require **root** or the explicit boot-arg **`-amdpnopchk`**.
+- **Writes** (fans, P-States, Curve Optimizer, SuperIO, …): require **root** or the explicit boot-arg **`-amdpnopchk`**.
 - Authorization is **not** based on process name (spoof-resistant). On denial, the dashboard shows a privilege banner (3.16.2). Details: [docs/PRIVILEGE_AND_SECURITY.md](docs/PRIVILEGE_AND_SECURITY.md).
 
 ---
@@ -170,7 +170,6 @@ Ensure the kexts are loaded in the exact dependency order in your OpenCore `conf
 - AMD Vanilla kernel patches applied.
 - `ProvideCurrentCpuInfo` quirk enabled in `config.plist`.
 - Boot arguments (recommended for full app control on a personal machine):
-  - **`-amdcppcactive`** — CPPC Active Mode / EPP profiles at boot.
   - **`-amdpnopchk`** — allow non-root UserClient **writes** (fans, EPP, CO, …). Without it, monitoring still works; controls need root or show the privilege banner.
   - **`-amdpdbg`** — verbose kext debug logging (troubleshooting only).
 
