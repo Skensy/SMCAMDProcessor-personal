@@ -26,8 +26,17 @@ static inline unsigned pmRyzen_down_windows(unsigned limit) {
     return limit == 2 ? 2 : 6;
 }
 
-static inline uint64_t pmRyzen_due_deadline(uint64_t deadline, uint64_t now) {
-    return deadline && deadline <= now ? deadline : 0;
+static inline uint64_t pmRyzen_promotion_interval(const uint64_t delays[2], unsigned limit,
+                                                  uint8_t state, int awake) {
+    if (!awake || !limit || state == 0 || state >= 8) return 0;
+    return delays[limit == 2];
+}
+
+// XNU will pick up the new PM deadline at any earlier clock event. Reprogram
+// now only if PM owns the programmed deadline or introduces an earlier one.
+static inline int pmRyzen_needs_timer_resync(uint64_t programmed, uint64_t previous, uint64_t next) {
+    return previous != next && ((previous && previous == programmed) ||
+                                (next && (!programmed || next < programmed)));
 }
 
 // Limit is the number of lower performance levels the governor may use.

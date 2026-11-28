@@ -29,12 +29,26 @@ pmRyzen_idle_strategy_t pmRyzen_idle_strategy = PMRYZEN_IDLE_STRATEGY_SIMPLE;
 static uint8_t pmRyzen_enabled_pstates;
 static bool renoirPolicy;
 static uint64_t promotionDelay[2];
+static void (*resyncDeadlines)(int);
 
-static void arm_promotion(pmProcessor_t *cpu) {
-    unsigned limit = pmRyzen_get_limit();
-    cpu->promotionDeadline = 0;
-    if (renoirPolicy && limit && cpu->cpu_awake && cpu->PState > 0 && cpu->PState < 8)
-        cpu->promotionDeadline = mach_absolute_time() + promotionDelay[limit == 2];
+// Local CPU, interrupts disabled. rtcDeadline is the absolute time last
+// requested by XNU's setPop(), in the same units as GetDeadline.
+static void set_promotion_deadline(uint32_t cn, uint64_t deadline) {
+    pmProcessor_t *cpu = &pmRyzen_cpus[cn];
+    uint64_t previous = cpu->promotionDeadline;
+    if (previous == deadline) return;
+    cpu->promotionDeadline = deadline;
+    if (resyncDeadlines && cpu->lcpu &&
+        pmRyzen_needs_timer_resync(cpu->lcpu->rtcDeadline, previous, deadline))
+        resyncDeadlines(cn);
+}
+
+static void arm_promotion(uint32_t cn) {
+    if (!renoirPolicy) return;
+    pmProcessor_t *cpu = &pmRyzen_cpus[cn];
+    uint64_t delay = pmRyzen_promotion_interval(promotionDelay, pmRyzen_get_limit(),
+                                                cpu->PState, cpu->cpu_awake != 0);
+    set_promotion_deadline(cn, delay ? mach_absolute_time() + delay : 0);
 }
 
 void pmRyzen_update_pstate_mask(uint8_t mask) {
@@ -75,7 +89,7 @@ pmDispatch_t pmRyzen_cpuFuncs = {
     .markAllCPUsOff = 0,
     .pmSetRunCount = 0,
     .pmIsCPUUnAvailable = 0,
-    .pmChooseCPU = &pmRyzen_choose_cpu,
+    .pmChooseCPU = 0, // Keep XNU's choice of idle core and processor set.
     .pmIPIHandler = 0,
     .pmThreadTellUrgency = 0,
     .pmActiveRTThreads = 0,
@@ -114,7 +128,7 @@ void pmRyzen_init_PState(void){
 // Called locally with interrupts disabled; account only successful MSR transitions.
 void pmRyzen_record_pstate(uint32_t cn, uint8_t state) {
     pmProcessor_t *cpu = &pmRyzen_cpus[cn];
-    if (state == 0) cpu->promotionDeadline = 0;
+    if (state == 0 || !pmRyzen_get_limit()) set_promotion_deadline(cn, 0);
     if (cpu->PState == state) return;
     if (state == 0) __atomic_fetch_add(&pmRyzen_hpcpus, 1, __ATOMIC_RELAXED);
     else if (cpu->PState == 0) __atomic_fetch_sub(&pmRyzen_hpcpus, 1, __ATOMIC_RELAXED);
@@ -129,13 +143,10 @@ static void set_PState(uint32_t cn, uint8_t state, bool force) {
         pmRyzen_record_pstate(cn, state);
 }
 
-// XNU asks for the local PM deadline on clock interrupts and timer updates.
-// Publish only elapsed deadlines so short bursts never schedule a wake from idle.
 static uint64_t renoir_get_deadline(x86_lcpu_t *lcpu) {
     unsigned cn = lcpu->cpu_num;
     if (cn >= XNU_MAX_CPU || !pmRyzen_get_limit()) return 0;
-    uint64_t deadline = pmRyzen_cpus[cn].promotionDeadline;
-    return deadline ? pmRyzen_due_deadline(deadline, mach_absolute_time()) : 0;
+    return pmRyzen_cpus[cn].promotionDeadline;
 }
 
 static void renoir_handle_deadline(x86_lcpu_t *lcpu) {
@@ -146,7 +157,7 @@ static void renoir_handle_deadline(x86_lcpu_t *lcpu) {
     if (cpu->cpu_awake && pmRyzen_get_limit()) {
         set_PState(cn, 0, false);
         cpu->ll_count = 0;
-        arm_promotion(cpu); // Retry a failed MSR write after another full interval.
+        arm_promotion(cn); // Retry a failed MSR write after another full interval.
     }
 }
 
@@ -161,7 +172,7 @@ static void pmRyzen_doPState_reset(void *preserveAllowed) {
     uint8_t state = preserveAllowed && renoirPolicy
         ? pmRyzen_reconciled_state(mask, cpu->PState, pmRyzen_get_limit()) : 0;
     set_PState(cn, state, !preserveAllowed);
-    arm_promotion(cpu);
+    arm_promotion(cn);
 }
 
 void pmRyzen_PState_reset(void) {
@@ -171,6 +182,15 @@ void pmRyzen_PState_reset(void) {
 void pmRyzen_reconcile_pstates(void) {
     bool preserve = true;
     mp_rendezvous_no_intrs(&pmRyzen_doPState_reset, &preserve);
+}
+
+static void refresh_local_deadline(void *unused) {
+    uint32_t cn = cpu_number();
+    if (cn < XNU_MAX_CPU) arm_promotion(cn);
+}
+
+void pmRyzen_refresh_deadlines(void) {
+    if (renoirPolicy) mp_rendezvous_no_intrs(refresh_local_deadline, NULL);
 }
 
 #pragma mark - Init / Stop
@@ -201,7 +221,7 @@ void pmRyzen_init(void *handle, int allowDispatch, bool renoir){
     
     renoirPolicy = renoir && allowDispatch;
     if (renoirPolicy) {
-        clock_interval_to_absolutetime_interval(25, NSEC_PER_MSEC, &promotionDelay[0]);
+        clock_interval_to_absolutetime_interval(10, NSEC_PER_MSEC, &promotionDelay[0]);
         clock_interval_to_absolutetime_interval(50, NSEC_PER_MSEC, &promotionDelay[1]);
         pmRyzen_cpuFuncs.GetDeadline = renoir_get_deadline;
         pmRyzen_cpuFuncs.Deadline = renoir_handle_deadline;
@@ -210,6 +230,7 @@ void pmRyzen_init(void *handle, int allowDispatch, bool renoir){
     if (allowDispatch) {
         if(*kernelDisp)(*pmRyzen_pmUnRegister)(*kernelDisp);
         pmKextRegister(PM_DISPATCH_VERSION, &pmRyzen_cpuFuncs, &cb);
+        if (renoirPolicy) resyncDeadlines = cb.resyncDeadlines;
     } else {
         pmKextRegister(PM_DISPATCH_VERSION, NULL, &cb);
     }
@@ -325,8 +346,6 @@ void pmRyzen_check_busy_cpu(uint32_t cn) {
     }
 }
 
-volatile uint32_t pmRyzen_last_woken_cpu=0;
-//uint32_t pmRyzen_last_idle_cpu=0;
 uint64_t pmRyzen_machine_idle(uint64_t maxDur){
 
     __asm__ volatile("cli;");
@@ -339,7 +358,7 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
     pmProcessor_t *self = &pmRyzen_cpus[cn];
     
     
-    self->promotionDeadline = 0;
+    set_promotion_deadline(cn, 0);
     self->cpu_awake = 0;
     self->arm_flag = 0;
     
@@ -362,7 +381,7 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
     if (tscnow < self->last_idle_tsc) {
         self->eff_timeacc = self->eff_idleacc = 0;
         self->last_start_tsc = tscnow;
-        arm_promotion(self);
+        arm_promotion(cn);
         return 0;
     }
     uint64_t tscela = tscnow - self->last_idle_tsc;
@@ -398,26 +417,8 @@ uint64_t pmRyzen_machine_idle(uint64_t maxDur){
 
     self->last_start_tsc = tscnow;
     self->last_idle_length = tscela;
-    if (renoirPolicy) arm_promotion(self);
-    
-    pmRyzen_last_woken_cpu = cn;
+    arm_promotion(cn);
     return 0;
-}
-
-#pragma mark - CPU Selection
-
-int pmRyzen_choose_cpu(int startCPU, int endCPU, int preferredCPU){
-    if (preferredCPU >= 0 && preferredCPU < XNU_MAX_CPU
-        && pmRyzen_cpunum_to_lcpu[preferredCPU]
-        && pmRyzen_cpus[preferredCPU].cpu_awake)
-        return preferredCPU;
-
-    if (pmRyzen_last_woken_cpu < XNU_MAX_CPU
-        && pmRyzen_cpunum_to_lcpu[pmRyzen_last_woken_cpu]
-        && pmRyzen_cpus[pmRyzen_last_woken_cpu].cpu_awake)
-        return pmRyzen_last_woken_cpu;
-        
-    return preferredCPU;
 }
 
 pmProcessor_t* pmRyzen_get_processor(uint32_t cpu){

@@ -1096,6 +1096,7 @@ IOReturn AMDRyzenCPUPowerManagement::applyPowerControlLocked(uint64_t state) {
                 pmRyzen_record_pstate(cn, r->previous[cn]);
         }, &req);
         pmRyzen_set_limit(oldLimit);
+        if (oldLimit) pmRyzen_refresh_deadlines();
     } else {
         PStateCtl = req.state;
         manualPStateRequested = true;
@@ -1661,6 +1662,8 @@ IOReturn AMDRyzenCPUPowerManagement::setPMPStateLimit(uint32_t state, bool autom
             manualPStateRequested = false;
             pmRyzen_reconcile_pstates();
             PStateCtl = 0;
+        } else {
+            pmRyzen_refresh_deadlines();
         }
     }
     IOLockUnlock(rendezvousLock);

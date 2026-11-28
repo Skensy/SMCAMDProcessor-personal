@@ -102,14 +102,13 @@ void pmRyzen_init(void*, int allowDispatch, bool renoir);
 void pmRyzen_stop(void);
 void pmRyzen_PState_reset(void);
 void pmRyzen_reconcile_pstates(void);
+void pmRyzen_refresh_deadlines(void);
 void pmRyzen_record_pstate(uint32_t cn, uint8_t state);
 void pmRyzen_update_pstate_mask(uint8_t mask);
 void pmRyzen_check_busy_cpu(uint32_t cn);
 float pmRyzen_avgload_pcpu(uint32_t);
 
 uint64_t pmRyzen_machine_idle(uint64_t);
-
-int pmRyzen_choose_cpu(int,int,int);
 
 pmProcessor_t* pmRyzen_get_processor(uint32_t);
 
